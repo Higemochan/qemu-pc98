@@ -49,12 +49,6 @@
 #include "qom/object.h"
 #include "ide-internal.h"
 
-/* Optional IDE I/O trace (PC98_IDE_TRACE): the probe register sequence. */
-static const char *const pc98_ide_regname[8] = {
-    "data", "err/feat", "seccnt", "secnum",
-    "cyllo", "cylhi", "drv/hd", "stat/cmd",
-};
-
 /* For debug. */
 #define pc98_ide_trace(tag, reg, val)
 #if 0
