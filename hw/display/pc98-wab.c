@@ -38,6 +38,7 @@
 #include "vga_regs.h"
 #include "vga_int.h"
 #include "qom/object.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/isa/isa.h"
 #include "hw/display/pc98-wab.h"
 #include "system/address-spaces.h"
@@ -2630,6 +2631,7 @@ struct Pc98WabState {
     uint8_t video_enable;         /* 0xff82 */
     uint8_t relay;                /* 0xfac / control reg 0x03 bit1 */
     uint8_t mmio_enable;          /* control reg 0x03 bit0 */
+    bool fixed_lfb;               /* expose the legacy 15 MiB aperture */
 };
 
 /*
@@ -2798,6 +2800,7 @@ static void pc98_wab_realize(DeviceState *dev, Error **errp)
                              &s->cirrus.cirrus_linear_io, 0, WAB_LFB_SIZE);
     memory_region_add_subregion_overlap(get_system_memory(), WAB_LFB_ADDR,
                                         &s->lfb, 2);
+    memory_region_set_enabled(&s->lfb, s->fixed_lfb);
 
     /* movable linear window, placed by control register 0x02 (data << 24) */
     memory_region_init_alias(&s->lfb_movable, OBJECT(dev), "pc98-wab-lfb-hi",
@@ -2825,9 +2828,13 @@ static void pc98_wab_reset(DeviceState *dev)
 static void pc98_wab_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    static const Property properties[] = {
+        DEFINE_PROP_BOOL("fixed-lfb", Pc98WabState, fixed_lfb, true),
+    };
 
     dc->realize = pc98_wab_realize;
     device_class_set_legacy_reset(dc, pc98_wab_reset);
+    device_class_set_props(dc, properties);
     dc->user_creatable = false;
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
     /* TODO: migration (reuse the Cirrus vmstate once the layout is settled) */
@@ -2847,10 +2854,11 @@ static void pc98_wab_register_types(void)
 
 type_init(pc98_wab_register_types)
 
-void pc98_wab_init(ISABus *bus)
+void pc98_wab_init(ISABus *bus, bool fixed_lfb)
 {
     ISADevice *isadev = isa_new(TYPE_PC98_WAB);
 
+    qdev_prop_set_bit(DEVICE(isadev), "fixed-lfb", fixed_lfb);
     /* give it an id so its console can be targeted (e.g. "screendump f wab") */
     DEVICE(isadev)->id = g_strdup("wab");
     isa_realize_and_unref(isadev, bus, &error_fatal);

@@ -132,11 +132,15 @@ struct Pc98MemState {
     MemoryRegion cbus_rom;
     MemoryRegion d8000_rom;
     MemoryRegion ide_rom;     /* IDE BIOS option ROM at 0xd8000 */
+    MemoryRegion pci_rom;     /* PCI: $PCI BIOS (BANK0) swapped in at 0xd8000 */
     MemoryRegion ide_ram;     /* IDE work RAM window at 0xda000 */
+    MemoryRegion d000_ram_b;  /* PCI: reg 0x64 shadow RAM at 0xdb000 (0x1000) */
+    MemoryRegion d000_ram_hi; /* PCI: reg 0x64 shadow RAM at 0xdc000 (0x4000) */
     MemoryRegion bios;
     MemoryRegion e8000_ram;
     MemoryRegion f8000_rom;
     MemoryRegion f8000_ram;
+    MemoryRegion f8e90_latch; /* PCI: IDE probe bitmap over the BIOS window */
 
     MemoryRegion ram_mid;
     MemoryRegion ram_f00000;
@@ -157,6 +161,11 @@ struct Pc98MemState {
     uint8_t sys16m;           /* 0x43b: 16 MiB system space enabled */
     uint8_t ide_rom_present;  /* pc98ide.bin was found */
     uint8_t hd_mask;          /* attached IDE disks, bit per drive */
+    bool has_pci;             /* PCI machine: 0xc0000 window shadowed as RAM */
+    bool has_pegc;            /* expose the 256-colour linear VRAM window */
+    uint8_t d000_shadow;      /* PCI reg 0x64: D000 shadow-RAM enable bits */
+    uint8_t bios_probe_write; /* PCI config 0x69 bit 4 */
+    uint8_t f8e90_reset;
 
     void (*ems_cb)(void *opaque, uint32_t value);
     void *ems_cb_arg;
@@ -173,7 +182,12 @@ static void mem_apply_window(Pc98MemState *s, int idx)
     memory_region_set_alias_offset(&w->ram, val * 0x10000);
 
     /*
-     * B/R/G + Intensity planar VRAM window at the window base. 
+     * val 0x0a selects the text + B/R/G planar VRAM window at the window
+     * base.  The 4th (intensity) plane lives at the fixed address 0xe0000
+     * and is accessible whenever the planar graphics VRAM is (a real PC-98
+     * game just writes 0xe0000 directly after enabling 16-colour mode; it
+     * does not switch the RAM-window map to reach it).  The historical
+     * val==0x0e "0xe0000 window" is kept as well.
      */
     memory_region_set_enabled(&w->tvram, val == 0x0a);
     memory_region_set_enabled(&w->vram_a8000, val == 0x0a);
@@ -198,6 +212,20 @@ static void mem_apply_top_bank(Pc98MemState *s, uint32_t ram_src)
         memory_region_set_enabled(&s->f8000_ram, false);
     }
 
+    if (s->has_pci) {
+        /*
+         * Xa7 keeps the IDE probe bitmap in a one-byte latch at 0xf8e90.
+         * The ITF writes it while BANK4 is visible by briefly opening config
+         * byte 0x69 bit 4.  The IDE BIOS reads it later with BANK7 visible.
+         */
+        memory_region_set_readonly(&s->f8e90_latch,
+                                   !s->bios_probe_write);
+        memory_region_set_enabled(&s->f8e90_latch,
+                                  s->bios_probe_write ||
+                                  (s->top_bank == BANK_BIOS_TOP &&
+                                   s->ide_rom_gate));
+    }
+
     memory_region_transaction_commit();
 }
 
@@ -206,8 +234,12 @@ static void mem_apply_sys16m(Pc98MemState *s)
     memory_region_transaction_begin();
     memory_region_set_enabled(&s->sys16m_mirror, s->sys16m);
     memory_region_set_enabled(&s->ram_f00000, !s->sys16m);
+
     /* the PEGC linear VRAM window lives in the 16MB system space */
-    memory_region_set_enabled(s->pegc_window, s->sys16m);
+    if (s->has_pegc) {
+        memory_region_set_enabled(s->pegc_window, s->sys16m);
+    }
+
     memory_region_transaction_commit();
 }
 
@@ -218,14 +250,80 @@ static void mem_apply_sys16m(Pc98MemState *s)
  */
 static void mem_apply_dwin(Pc98MemState *s)
 {
-    bool ide_rom_on = s->dwin_sel == DWIN_IDE &&
-                      s->ide_rom_gate && s->ide_rom_present;
-    bool ide_ram_on = ide_rom_on && s->ide_ram_gate;
+    bool pci_rom_on = false;
+    bool ide_rom_on;
+    bool ide_ram_on;
+    bool d000_b_on = false;
+    bool d000_hi_on = false;
+
+    if (s->has_pci) {
+        /*
+         * Port 0x63c (dwin_sel) selects the 0xd8000 window content:
+         * value 1 swaps in the $PCI BIOS (BANK0); any other
+         * value shows the base option ROM (the internal IDE BIOS).
+         *
+         * Config register 0x64 then gates the option ROM's shadow RAM back
+         * over it one 4 KiB page at a time: bit 0x10 -> 0xda000,
+         * bit 0x20 -> 0xdb000, bit 0x80 -> 0xdc000-0xdffff.
+         */
+        pci_rom_on = s->dwin_sel == 1;
+        ide_rom_on = s->dwin_sel != 1 &&
+                     s->ide_rom_gate && s->ide_rom_present;
+        ide_ram_on = (s->d000_shadow & 0x10) != 0;
+        d000_b_on  = (s->d000_shadow & 0x20) != 0;
+        d000_hi_on = (s->d000_shadow & 0x80) != 0;
+    } else {
+        ide_rom_on = s->dwin_sel == DWIN_IDE &&
+                     s->ide_rom_gate && s->ide_rom_present;
+        ide_ram_on = ide_rom_on && s->ide_ram_gate;
+    }
 
     memory_region_transaction_begin();
     memory_region_set_enabled(&s->ide_rom, ide_rom_on);
     memory_region_set_enabled(&s->ide_ram, ide_ram_on);
+    if (s->has_pci) {
+        memory_region_set_enabled(&s->pci_rom, pci_rom_on);
+        memory_region_set_enabled(&s->d000_ram_b, d000_b_on);
+        memory_region_set_enabled(&s->d000_ram_hi, d000_hi_on);
+    }
     memory_region_transaction_commit();
+}
+
+/*
+ * Host bridge (dev0) config register 0x64 write: the D000-segment shadow
+ * control byte (0x67 of the dword).  Called from the PCI host bridge.
+ */
+void pc98_mem_set_d000_shadow(void *opaque, uint8_t bits)
+{
+    Pc98MemState *s = opaque;
+
+    if (s->d000_shadow != bits) {
+        s->d000_shadow = bits;
+        mem_apply_dwin(s);
+    }
+}
+
+void pc98_mem_set_bios_probe_write(void *opaque, bool enable)
+{
+    Pc98MemState *s = opaque;
+
+    if (s->bios_probe_write != enable) {
+        if (s->bios_probe_write && !enable) {
+            uint8_t *probe =
+                memory_region_get_ram_ptr(&s->f8e90_latch);
+
+            /*
+             * The ITF writes its candidate-drive mask here.  The chipset
+             * returns the actually populated IDE slots in the low nibble;
+             * otherwise Xa7 probes empty channels indefinitely.  This is the
+             * PCI-firmware equivalent of the hd_connect value that the older
+             * PC-98 memory model exposed at the same physical address.
+             */
+            *probe = (*probe & 0xf0) | (s->hd_mask & 0x0f);
+        }
+        s->bios_probe_write = enable;
+        mem_apply_top_bank(s, 0xf8000);
+    }
 }
 
 /* fill in the BIOS work area when the writable BIOS RAM copy is paged in */
@@ -405,6 +503,9 @@ static void mem_romgate_write(void *opaque, uint32_t addr, uint32_t data)
 
     s->ide_rom_gate = !!(data & 0x10);
     mem_apply_dwin(s);
+    if (s->has_pci) {
+        mem_apply_top_bank(s, 0xf8000);
+    }
 
     if (s->bios_ram_gate != !!(data & 0x02)) {
         s->bios_ram_gate = !!(data & 0x02);
@@ -659,13 +760,25 @@ static void pc98_mem_reset(void *opaque)
     mem_apply_window(s, 0);
     mem_apply_window(s, 1);
 
-    s->dwin_sel = DWIN_IDE;
-    s->ide_rom_gate = 1;
+    /*
+     * PCI (Xa7) firmware shadows the 0xd8000 window as RAM for the sizing
+     * POST and gates the option ROM in only afterwards, so start with both
+     * the window content selector (dwin_sel != 1) and the IDE gate off there.
+     * The BX2 firmware expects the IDE ROM visible from reset (dwin=DWIN_IDE).
+     */
+    s->dwin_sel = s->has_pci ? 0 : DWIN_IDE;
+    s->ide_rom_gate = s->has_pci ? 0 : 1;
     s->ide_ram_gate = 1;
     mem_apply_dwin(s);
 
     s->bios_ram_gate = 0;
     memory_region_set_enabled(&s->e8000_ram, false);
+
+    s->bios_probe_write = 0;
+    if (s->has_pci) {
+        *(uint8_t *)memory_region_get_ram_ptr(&s->f8e90_latch) =
+            s->f8e90_reset;
+    }
 
     s->top_bank = BANK_ITF;
     mem_apply_top_bank(s, 0xf8000);
@@ -710,6 +823,8 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
                             uint64_t ram_size,
                             const Pc98VgaRegions *vga,
                             uint8_t hd_connect,
+                            bool has_pci,
+                            bool has_pegc,
                             void (*ems_select)(void *opaque, uint32_t value),
                             void *ems_opaque)
 {
@@ -719,6 +834,8 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
     s->ram = ram;
     s->ram_size = ram_size;
     s->hd_mask = hd_connect;
+    s->has_pci = has_pci;
+    s->has_pegc = has_pegc;
     s->sys16m = 1;
     s->ems_cb = ems_select;
     s->ems_cb_arg = ems_opaque;
@@ -731,6 +848,7 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
                      "(pc98bank*.bin or pc98itf.bin+pc98bios.bin; use -L)");
         exit(1);
     }
+    s->f8e90_reset = buf[BANK_BIOS_TOP * ROM_BANK_BYTES + 0xe90];
     memory_region_init_rom(&s->rom, NULL, "pc98.rom", ROM_IMAGE_BYTES,
                            &error_fatal);
     memcpy(memory_region_get_ram_ptr(&s->rom), buf, ROM_IMAGE_BYTES);
@@ -764,25 +882,77 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
     mem_build_window(s, 0, 0x80000, vga);
     mem_build_window(s, 1, 0xa0000, vga);
 
-    memory_region_init_alias(&s->cbus_rom, NULL, "pc98.cbus-rom",
-                             &s->rom_empty, 0, 0x18000);
-    memory_region_add_subregion(&s->lowmem, 0xc0000, &s->cbus_rom);
+    /*
+     * C-bus / option-ROM region at 0xc0000-0xdffff.
+     *
+     * On the PCI machines (Xa7-class firmware) the chipset shadows this whole
+     * region as RAM: the memory-sizing POST writes and reads back 0xc0000
+     * through 0xdffff (including the 0xd8000 option-ROM window), and only
+     * *after* the test does the firmware gate the IDE/PCI option ROM in.  So
+     * back the full 0x20000 with the underlying DRAM and skip the open-bus
+     * ROM window; the IDE ROM still overlays at 0xd8000 once gated on.
+     *
+     * On the older (BX2) firmware the 0xc0000 window stays an open-bus ROM
+     * whose 2 KiB RETF fill keeps the BIOS's far-call probe from executing
+     * garbage, and the 0xd8000 window is a separate open-bus ROM.
+     */
+    if (has_pci) {
+        memory_region_init_alias(&s->cbus_rom, NULL, "pc98.cbus-ram",
+                                 ram, 0xc0000, 0x20000);
+        memory_region_add_subregion(&s->lowmem, 0xc0000, &s->cbus_rom);
+    } else {
+        memory_region_init_alias(&s->cbus_rom, NULL, "pc98.cbus-rom",
+                                 &s->rom_empty, 0, 0x18000);
+        memory_region_add_subregion(&s->lowmem, 0xc0000, &s->cbus_rom);
 
-    memory_region_init_alias(&s->d8000_rom, NULL, "pc98.d8000-rom",
-                             &s->rom_empty, 0, 0x8000);
-    memory_region_add_subregion(&s->lowmem, 0xd8000, &s->d8000_rom);
+        memory_region_init_alias(&s->d8000_rom, NULL, "pc98.d8000-rom",
+                                 &s->rom_empty, 0, 0x8000);
+        memory_region_add_subregion(&s->lowmem, 0xd8000, &s->d8000_rom);
+    }
 
-    /* IDE BIOS option ROM at 0xd8000 (overlays the empty window) */
+    /*
+     * IDE / option-ROM at 0xd8000 (overlays the window).  The BX2 firmware
+     * uses only the 8 KiB IDE BIOS; the Xa7 firmware banks in a larger option
+     * ROM (0x8000) whose upper pages it shadows to RAM via reg 0x64.
+     */
     memory_region_init_alias(&s->ide_rom, NULL, "pc98.ide-rom",
-                             &s->rom, OFF_IDE, 0x2000);
+                             &s->rom, OFF_IDE, has_pci ? 0x8000 : 0x2000);
     memory_region_add_subregion_overlap(&s->lowmem, 0xd8000, &s->ide_rom, 1);
     memory_region_set_enabled(&s->ide_rom, false);
 
-    /* IDE BIOS work RAM window at 0xda000 (tested by the ITF POST) */
+    /* PCI: $PCI BIOS (BANK0) swapped into 0xd8000 when dwin_sel == 1 */
+    if (has_pci) {
+        memory_region_init_alias(&s->pci_rom, NULL, "pc98.pci-rom",
+                                 &s->rom, OFF_PCI, 0x8000);
+        memory_region_add_subregion_overlap(&s->lowmem, 0xd8000,
+                                            &s->pci_rom, 1);
+        memory_region_set_enabled(&s->pci_rom, false);
+    }
+
+    /*
+     * IDE BIOS work RAM window at 0xda000 (tested by the ITF POST).  The BX2
+     * firmware pages the whole 0x2000 in via port 0x1e8e; the Xa7 firmware
+     * gates it one page at a time via reg 0x64, so restrict it to page 10.
+     */
     memory_region_init_alias(&s->ide_ram, NULL, "pc98.ide-ram",
-                             ram, 0xda000, 0x2000);
+                             ram, 0xda000, has_pci ? 0x1000 : 0x2000);
     memory_region_add_subregion_overlap(&s->lowmem, 0xda000, &s->ide_ram, 2);
     memory_region_set_enabled(&s->ide_ram, false);
+
+    /* PCI: reg 0x64 per-page shadow RAM over the option ROM (0xdb000, 0xdc000) */
+    if (has_pci) {
+        memory_region_init_alias(&s->d000_ram_b, NULL, "pc98.d000-ram-b",
+                                 ram, 0xdb000, 0x1000);
+        memory_region_add_subregion_overlap(&s->lowmem, 0xdb000,
+                                            &s->d000_ram_b, 2);
+        memory_region_set_enabled(&s->d000_ram_b, false);
+
+        memory_region_init_alias(&s->d000_ram_hi, NULL, "pc98.d000-ram-hi",
+                                 ram, 0xdc000, 0x4000);
+        memory_region_add_subregion_overlap(&s->lowmem, 0xdc000,
+                                            &s->d000_ram_hi, 2);
+        memory_region_set_enabled(&s->d000_ram_hi, false);
+    }
 
     memory_region_init_alias(&s->bios, NULL, "pc98.bios",
                              &s->rom, OFF_BIOS, 0x18000);
@@ -805,6 +975,22 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
                                         &s->f8000_ram, 3);
     memory_region_set_enabled(&s->f8000_ram, false);
 
+    if (has_pci) {
+        /*
+         * Xa7 config byte 0x69 bit 4 exposes this byte for the ITF's write;
+         * after the BIOS bank is selected it remains visible read-only to
+         * the IDE option ROM.
+         */
+        memory_region_init_ram(&s->f8e90_latch, NULL,
+                               "pc98.f8e90-latch", 1, &error_fatal);
+        *(uint8_t *)memory_region_get_ram_ptr(&s->f8e90_latch) =
+            s->f8e90_reset;
+        memory_region_add_subregion_overlap(&s->lowmem, 0xf8e90,
+                                            &s->f8e90_latch, 4);
+        memory_region_set_readonly(&s->f8e90_latch, true);
+        memory_region_set_enabled(&s->f8e90_latch, false);
+    }
+
     memory_region_add_subregion(system_memory, 0, &s->lowmem);
 
     /* 1 MiB .. 15 MiB RAM */
@@ -820,9 +1006,11 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
 
     /* PEGC 256-colour linear VRAM window (16MB system space only) */
     s->pegc_window = vga->vram_f00000;
-    memory_region_add_subregion_overlap(system_memory, 0xf00000,
-                                        s->pegc_window, 1);
-    memory_region_set_enabled(s->pegc_window, s->sys16m);
+    if (s->has_pegc) {
+        memory_region_add_subregion_overlap(system_memory, 0xf00000,
+                                            s->pegc_window, 1);
+        memory_region_set_enabled(s->pegc_window, s->sys16m);
+    }
 
     /*
      * 16MB system space mirror of the low-1MiB layout (0xfa0000..0xffffff

@@ -1,5 +1,10 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# pc98-sys.c
+pc98_sys_hrtimer_write(uint8_t value, uint8_t mode) "write 0x%02x, mode %u"
+pc98_sys_hrtimer_read(uint8_t value) "read/ack 0x%02x"
+pc98_sys_hrtimer_irq(uint8_t mode) "IRQ15 assert, mode %u"
+
 # allwinner-cpucfg.c
 allwinner_cpucfg_cpu_reset(uint8_t cpu_id, uint32_t reset_addr) "id %u, reset_addr 0x%" PRIx32
 allwinner_cpucfg_read(uint64_t offset, uint64_t data, unsigned size) "offset 0x%" PRIx64 " data 0x%" PRIx64 " size %" PRIu32

@@ -43,6 +43,7 @@
 #include "system/reset.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
+#include "trace.h"
 
 #define FONT_FILE_NAME  "pc98font.bin"
 #define FONT_FILE_SIZE  0x46800
@@ -160,6 +161,7 @@ struct EGCState {
 
 struct VGAState {
     QemuConsole *con;
+    bool has_pegc;
 
     MemoryRegion tvram_mr;
     MemoryRegion vram_a8000_mr;
@@ -3076,6 +3078,8 @@ static void mode_flipflop1_write(void *opaque, uint32_t addr, uint32_t value)
     VGAState *s = opaque;
     int num = (value >> 1) & 7;
 
+    trace_pc98_vga_mode_write(0x68, value);
+
     if (s->mode1[num] != (value & 1)) {
         switch (num) {
         case MODE1_ATRSEL:
@@ -3124,6 +3128,8 @@ static void mode_flipflop2_write(void *opaque, uint32_t addr, uint32_t value1)
     uint8_t value = value1 & 1;
     int num = (value1 >> 1) & 0x7f;
 
+    trace_pc98_vga_mode_write(0x6a, value1);
+
     switch (num) {
     case 0x00:
         /* select 8/16 color */
@@ -3142,7 +3148,7 @@ static void mode_flipflop2_write(void *opaque, uint32_t addr, uint32_t value1)
         break;
     case 0x10:
         /* select 16/256 color */
-        if (s->mode2[MODE2_WRITE_MASK]) {
+        if (s->has_pegc && s->mode2[MODE2_WRITE_MASK]) {
             if (s->mode2[num] != value) {
                 s->dirty |= DIRTY_PALETTE | DIRTY_VRAM0 | DIRTY_VRAM1;
                 s->mode2[num] = value;
@@ -3151,7 +3157,7 @@ static void mode_flipflop2_write(void *opaque, uint32_t addr, uint32_t value1)
         break;
     case 0x34:
         /* select 400/480 lines */
-        if (s->mode2[MODE2_WRITE_MASK]) {
+        if (s->has_pegc && s->mode2[MODE2_WRITE_MASK]) {
             if (s->mode2[num] != value) {
                 s->dirty |= DIRTY_VRAM0 | DIRTY_VRAM1;
                 s->mode2[num] = value;
@@ -4919,12 +4925,14 @@ static const uint8_t memsw_default[] = {
 };
 
 Pc98VgaState *pc98_vga_init(MemoryRegion *system_io, qemu_irq irq,
+                            bool has_pegc,
                             Pc98VgaRegions *regions)
 {
     VGAState *s;
     int i;
 
     s = g_malloc0(sizeof(VGAState));
+    s->has_pegc = has_pegc;
 
     /* font */
     font_init(s);

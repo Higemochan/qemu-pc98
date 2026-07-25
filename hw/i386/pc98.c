@@ -36,6 +36,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/audio/pc98-wss.h"
 #include "hw/block/pc98-fdc.h"
+#include "hw/display/pc98-coregraph.h"
 #include "hw/display/pc98-vga.h"
 #include "hw/display/pc98-wab.h"
 #include "hw/dma/pc98-dma.h"
@@ -49,6 +50,8 @@
 #include "hw/isa/isa.h"
 #include "hw/misc/pc98-sys.h"
 #include "hw/net/pc98-lgy98.h"
+#include "hw/pci/pci.h"
+#include "hw/core/sysbus.h"
 #include "hw/timer/i8254-pc98.h"
 #include "system/address-spaces.h"
 #include "system/ioport.h"
@@ -97,9 +100,17 @@ struct Pc98MachineState {
 
 struct Pc98MachineClass {
     X86MachineClass parent;
+
+    bool has_pci;   /* instantiate the PCI host bridge */
+    bool has_wab;   /* instantiate the legacy NEC-LSI/Cirrus WAB */
+    bool has_pegc;  /* expose the built-in PEGC 256-colour mode */
+    bool has_coregraph; /* PCI Core-Graph with a non-PnP Cirrus child */
 };
 
-#define TYPE_PC98_MACHINE MACHINE_TYPE_NAME("pc98")
+#define TYPE_PC98_MACHINE     MACHINE_TYPE_NAME("pc98")
+#define TYPE_PC98_PCI_MACHINE MACHINE_TYPE_NAME("pc98-pci")
+#define TYPE_PC9801_MACHINE    MACHINE_TYPE_NAME("pc9801")
+#define TYPE_PC9821_MACHINE    MACHINE_TYPE_NAME("pc9821")
 OBJECT_DECLARE_TYPE(Pc98MachineState, Pc98MachineClass, PC98_MACHINE)
 
 /*
@@ -209,6 +220,17 @@ static uint32_t pc98_sound_id_read(void *opaque, uint32_t addr)
     return 0x7f; /* no FM/PCM sound board attached yet */
 }
 
+/*
+ * 0xf070-0xf07f: optional chipset feature-detection registers probed by the
+ * Xa7-class firmware (e.g. 0xf074 bit 3 -> BIOS work-area 0x480 bit 3).  We
+ * model none of these devices; return 0 ("feature absent") rather than the
+ * open-bus 0xff, which would advertise phantom hardware.
+ */
+static uint32_t pc98_f07x_read(void *opaque, uint32_t addr)
+{
+    return 0x00;
+}
+
 static const MemoryRegionPortio pc98_board_ports[] = {
     { 0xf0,   1, 1, .read = pc98_ide_presence_read,
                     .write = pc98_reset_pulse_write },
@@ -220,6 +242,7 @@ static const MemoryRegionPortio pc98_board_ports[] = {
                     .write = pc98_reset_latch_write },
     { 0x9894, 1, 1, .read = pc98_wait_strap_read },
     { 0xa460, 1, 1, .read = pc98_sound_id_read },
+    { 0xf070, 16, 1, .read = pc98_f07x_read },
     PORTIO_END_OF_LIST(),
 };
 
@@ -232,6 +255,7 @@ static void pc98_devices_init(Pc98MachineState *pms)
     ISADevice *sysdev;
     qemu_irq *i8259;
     Pc98VgaRegions vga_regions;
+    Pc98MachineClass *pmc = PC98_MACHINE_GET_CLASS(pms);
     int i;
 
     gsi_state = g_malloc0(sizeof(*gsi_state));
@@ -299,7 +323,8 @@ static void pc98_devices_init(Pc98MachineState *pms)
     pms->sys = PC98_SYS(sysdev);
 
     /* display (vsync IRQ2); must precede pc98_mem_init */
-    pms->vga = pc98_vga_init(get_system_io(), x86ms->gsi[2], &vga_regions);
+    pms->vga = pc98_vga_init(get_system_io(), x86ms->gsi[2],
+                             pmc->has_pegc, &vga_regions);
 
     /*
      * memory controller: ROM banks, RAM windows, mirrors.  hd_connect
@@ -308,10 +333,20 @@ static void pc98_devices_init(Pc98MachineState *pms)
     pms->mem = pc98_mem_init(get_system_memory(), get_system_io(),
                              machine->ram, machine->ram_size, &vga_regions,
                              pms->ide ? pc98_ide_connected(pms->ide) : 0,
+                             pmc->has_pci, pmc->has_pegc,
                              pc98_vga_select_ems, pms->vga);
 
-    /* Window Accelerator Board (Cirrus GD5426 behind the NEC LSI) */
-    pc98_wab_init(isa_bus);
+    /*
+     * Window Accelerator Board (Cirrus GD5426 behind the NEC LSI).
+     *
+     * The legacy WAB's fixed 15 MiB aperture conflicts with RAM after the
+     * Xa7 firmware disables the 16 MiB system-space hole.  The PCI model
+     * therefore exposes only the relocatable high aperture; the non-PCI
+     * model retains the fixed DOS-facing window.
+     */
+    if (pmc->has_wab) {
+        pc98_wab_init(isa_bus, !pmc->has_pci);
+    }
 
     /* LGY-98 C-bus Ethernet (NE2000-compatible, IRQ6) */
     pc98_lgy98_init(isa_bus, x86ms->gsi[6]);
@@ -323,6 +358,33 @@ static void pc98_devices_init(Pc98MachineState *pms)
      * PC-98 DMA controller.
      */
     pc98_wss_init(isa_bus);
+
+    /*
+     * PCI host bridge (pc98-pci only).  PC-98 uses Configuration
+     * Mechanism #1 at the PC/AT ports 0xCF8/0xCFC.  The four PCI
+     * interrupt pins are routed to a single free IRQ for now; no
+     * built-in PCI function raises an interrupt yet.
+     */
+    if (pmc->has_pci) {
+        DeviceState *host = qdev_new(TYPE_PC98_PCI_HOST);
+        SysBusDevice *sbd = SYS_BUS_DEVICE(host);
+
+        sysbus_realize_and_unref(sbd, &error_fatal);
+        for (i = 0; i < 4; i++) {
+            sysbus_connect_irq(sbd, i, x86ms->gsi[5]);
+        }
+        /* wire dev0 config reg 0x64 (D000 window shadow) to the mem controller */
+        pc98_pci_set_d000_mem(pms->mem);
+        if (pmc->has_coregraph) {
+            PCIDevice *coregraph =
+                pci_new(PCI_DEVFN(7, 0), TYPE_PC98_COREGRAPH);
+
+            /* Keep the secondary console addressable from HMP/QMP. */
+            DEVICE(coregraph)->id = g_strdup("coregraph");
+            pci_realize_and_unref(coregraph, pc98_pci_get_bus(host),
+                                  &error_fatal);
+        }
+    }
 
     /* board ports: A20 gate, software reset, and firmware straps */
     portio_list_init(&pms->portio_list, OBJECT(pms), pc98_board_ports,
@@ -372,6 +434,7 @@ static GlobalProperty pc98_compat_props[] = {
 static void pc98_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
+    Pc98MachineClass *pmc = PC98_MACHINE_CLASS(oc);
 
     mc->init = pc98_machine_state_init;
     mc->reset = pc98_machine_reset;
@@ -385,20 +448,104 @@ static void pc98_class_init(ObjectClass *oc, const void *data)
     mc->no_parallel = 1;
     mc->no_cdrom = 1;
 
+    pmc->has_pci = false;
+    pmc->has_wab = true;
+    pmc->has_pegc = true;
+    pmc->has_coregraph = false;
+
     compat_props_add(mc->compat_props, pc98_compat_props,
                      G_N_ELEMENTS(pc98_compat_props));
 }
 
-static const TypeInfo pc98_machine_info = {
-    .name          = TYPE_PC98_MACHINE,
-    .parent        = TYPE_X86_MACHINE,
-    .instance_size = sizeof(Pc98MachineState),
-    .class_size    = sizeof(Pc98MachineClass),
-    .class_init    = pc98_class_init,
+/*
+ * pc98-pci: PCI-equipped PC-9821 (e.g. Xa7/C9W).  Adds the PCI host
+ * bridge; the firmware directory supplied via -L must hold the PCI ROM
+ * set (pc98bank0.bin..pc98bank7.bin plus pc98font.bin).  Core-Graph is
+ * not modelled yet, so the Windows Cirrus driver falls back to WAB.
+ */
+static void pc98_pci_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    Pc98MachineClass *pmc = PC98_MACHINE_CLASS(oc);
+
+    mc->desc = "NEC PC-9821 (PCI)";
+    /*
+     * The real PCI-equipped PC-9821 (Xa7/C9W) is a Pentium machine, but its
+     * firmware does not boot yet (memory-map bring-up pending), and the BX2
+     * ROM's ITF cache self-test halts on a Pentium.  Keep the base 486 default
+     * for now so pc98-pci boots the existing images; switch to "pentium" once
+     * the Xa7 firmware is brought up.
+     */
+
+    pmc->has_pci = true;
+
+    /*
+     * compat_props are not inherited: machine_class_base_init() gives every
+     * derived machine a fresh, empty array.  Re-add the PC-98 A20 semantics
+     * (1 MiB address wrap) that the base pc98 class installs.
+     */
+    compat_props_add(mc->compat_props, pc98_compat_props,
+                     G_N_ELEMENTS(pc98_compat_props));
+}
+
+/*
+ * pc9801: the pre-PC-9821 configuration.  It retains the base GDC/GRCG/EGC
+ * display but has neither the PC-9821 PEGC packed-pixel extension nor the
+ * local-bus Window Accelerator Board.
+ */
+static void pc9801_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    Pc98MachineClass *pmc = PC98_MACHINE_CLASS(oc);
+
+    mc->desc = "NEC PC-9801";
+    pmc->has_wab = false;
+    pmc->has_pegc = false;
+
+    compat_props_add(mc->compat_props, pc98_compat_props,
+                     G_N_ELEMENTS(pc98_compat_props));
+}
+
+/*
+ * pc9821: PCI-equipped PC-9821 with the on-board Core-Graph bridge.  The
+ * Cirrus chip below Core-Graph is not itself visible as a PCI function.
+ */
+static void pc9821_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    Pc98MachineClass *pmc = PC98_MACHINE_CLASS(oc);
+
+    mc->desc = "NEC PC-9821";
+    pmc->has_wab = false;
+    pmc->has_coregraph = true;
+
+    compat_props_add(mc->compat_props, pc98_compat_props,
+                     G_N_ELEMENTS(pc98_compat_props));
+}
+
+static const TypeInfo pc98_machine_types[] = {
+    {
+        .name          = TYPE_PC98_MACHINE,
+        .parent        = TYPE_X86_MACHINE,
+        .instance_size = sizeof(Pc98MachineState),
+        .class_size    = sizeof(Pc98MachineClass),
+        .class_init    = pc98_class_init,
+    },
+    {
+        .name          = TYPE_PC98_PCI_MACHINE,
+        .parent        = TYPE_PC98_MACHINE,
+        .class_init    = pc98_pci_class_init,
+    },
+    {
+        .name          = TYPE_PC9801_MACHINE,
+        .parent        = TYPE_PC98_MACHINE,
+        .class_init    = pc9801_class_init,
+    },
+    {
+        .name          = TYPE_PC9821_MACHINE,
+        .parent        = TYPE_PC98_PCI_MACHINE,
+        .class_init    = pc9821_class_init,
+    },
 };
 
-static void pc98_machine_init_types(void)
-{
-    type_register_static(&pc98_machine_info);
-}
-type_init(pc98_machine_init_types);
+DEFINE_TYPES(pc98_machine_types)

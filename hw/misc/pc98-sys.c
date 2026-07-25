@@ -38,7 +38,9 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/isa/isa.h"
 #include "hw/misc/pc98-sys.h"
+#include "system/address-spaces.h"
 #include "system/rtc.h"
+#include "trace.h"
 
 /* Serial control lines on the calendar-clock command port (0x20). */
 enum {
@@ -59,6 +61,8 @@ enum {
 
 #define TIMESTAMP_HZ    307200
 #define TICK_PERIOD_NS  15625000LL   /* 1/64 second */
+#define HRTIME_ADDR     0x04f1
+#define HRTIME_DAY_TICKS (24 * 60 * 60 * 32)
 
 struct Pc98SysState {
     ISADevice parent_obj;
@@ -71,6 +75,8 @@ struct Pc98SysState {
     uint8_t  cal_cmd_shift;
     uint8_t  tick_mode;
     uint8_t  tick_count;
+    uint8_t  hrtime_count;
+    bool     hrtime_initialized;
 
     /* system 8255 PPI (ports 0x31-0x37) */
     uint8_t sys_a;
@@ -105,15 +111,63 @@ struct Pc98SysState {
  * This handler runs every 1/64 s, so an interrupt is raised once every
  * (mode + 1) invocations unless the source is disabled.
  */
+static void pc98_sys_hrtime_init(Pc98SysState *s)
+{
+    struct tm now;
+    uint32_t ticks;
+    int64_t ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    qemu_get_timedate(&now, 0);
+    ticks = ((now.tm_hour * 60 + now.tm_min) * 60 + now.tm_sec) * 32;
+    ticks += (ns % NANOSECONDS_PER_SECOND) * 32 / NANOSECONDS_PER_SECOND;
+
+    /*
+     * Bits 23:22 are a modulo-four elapsed-day field.  Real PC-9821
+     * firmware initializes it to one; Windows 98 also depends on it not
+     * starting at zero.
+     */
+    address_space_stl_le(&address_space_memory, HRTIME_ADDR,
+                         ticks | 0x400000, MEMTXATTRS_UNSPECIFIED, NULL);
+    s->hrtime_initialized = true;
+}
+
+static void pc98_sys_hrtime_advance(Pc98SysState *s)
+{
+    uint32_t ticks;
+
+    if (!s->hrtime_initialized) {
+        pc98_sys_hrtime_init(s);
+        return;
+    }
+
+    ticks = address_space_ldl_le(&address_space_memory, HRTIME_ADDR,
+                                 MEMTXATTRS_UNSPECIFIED, NULL);
+    ticks++;
+    if ((ticks & 0x3fffff) >= HRTIME_DAY_TICKS) {
+        ticks = ((ticks & ~0x3fffff) + 0x400000) & 0xffffff;
+    }
+    address_space_stl_le(&address_space_memory, HRTIME_ADDR, ticks,
+                         MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
 static void pc98_sys_tick(void *opaque)
 {
     Pc98SysState *s = opaque;
+    static const uint8_t periods[4] = { 1, 2, 0, 4 };
+    uint8_t period = periods[s->tick_mode & 0x03];
 
-    if ((s->tick_mode & 0x03) != 2) {
-        if (++s->tick_count > (s->tick_mode & 0x03)) {
+    if (period) {
+        if (++s->tick_count >= period) {
             qemu_set_irq(s->irq, 1);
             s->tick_count = 0;
+            trace_pc98_sys_hrtimer_irq(s->tick_mode);
         }
+    }
+
+    /* The BIOS work-area clock always advances at 32 Hz. */
+    if (++s->hrtime_count >= 2) {
+        pc98_sys_hrtime_advance(s);
+        s->hrtime_count = 0;
     }
 
     timer_mod(s->tick_timer,
@@ -182,16 +236,20 @@ static void cal_tick_ctl_write(void *opaque, uint32_t addr, uint32_t value)
 {
     Pc98SysState *s = opaque;
 
-    s->tick_mode = value;
+    s->tick_mode = value & 0x03;
     s->tick_count = 0;
+    qemu_set_irq(s->irq, 0);
+    trace_pc98_sys_hrtimer_write(value, s->tick_mode);
 }
 
 static uint32_t cal_tick_ctl_read(void *opaque, uint32_t addr)
 {
     Pc98SysState *s = opaque;
+    uint8_t value = 0x80 | s->tick_mode;
 
     qemu_set_irq(s->irq, 0);        /* reading acknowledges the interrupt */
-    return s->tick_mode;
+    trace_pc98_sys_hrtimer_read(value);
+    return value;
 }
 
 /* --- system 8255 PPI --- */
@@ -430,8 +488,12 @@ static void pc98_sys_reset(DeviceState *dev)
     s->cal_mode = 0xff;
     s->cal_port = 0;
     s->cal_cmd = 0;
-    s->tick_mode = 2;               /* periodic interrupt disabled at reset */
+    /* PC-9821 starts the high-resolution timer at 32 Hz. */
+    s->tick_mode = 1;
     s->tick_count = 0;
+    s->hrtime_count = 0;
+    s->hrtime_initialized = false;
+    qemu_set_irq(s->irq, 0);
 
     s->sys_a = 0x00;
     s->sys_b = 0x00;

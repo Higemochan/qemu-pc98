@@ -140,6 +140,7 @@ static int64_t pc98_pit_get_next_transition_time(PITChannelState *s,
 {
     uint64_t d, next_time, base;
     int period2;
+    bool round_up = false;
 
     d = muldiv64(current_time - s->count_load_time, PC98_PIT_FREQ,
                  NANOSECONDS_PER_SECOND);
@@ -156,10 +157,22 @@ static int64_t pc98_pit_get_next_transition_time(PITChannelState *s,
     case 2:
         base = QEMU_ALIGN_DOWN(d, s->count);
         if ((d - base) == 0 && d != 0) {
-            next_time = base + s->count;
+            /*
+             * The IRQ-facing output is an active-high terminal-count pulse.
+             * Return it low one input clock later, then wait for the next
+             * terminal count.
+             */
+            next_time = d + 1;
         } else {
-            next_time = base + s->count + 1;
+            next_time = base + s->count;
         }
+        /*
+         * A floor conversion can map count + 1 back to count when converted
+         * from nanoseconds to PIT clocks.  That leaves the IRQ high forever,
+         * which is particularly easy to trigger with the PC-98 2.4576 MHz
+         * clock and Windows' 24576 divisor.
+         */
+        round_up = true;
         break;
     case 3:
         base = QEMU_ALIGN_DOWN(d, s->count);
@@ -181,8 +194,11 @@ static int64_t pc98_pit_get_next_transition_time(PITChannelState *s,
         }
         break;
     }
-    next_time = s->count_load_time + muldiv64(next_time, NANOSECONDS_PER_SECOND,
-                                              PC98_PIT_FREQ);
+    next_time = s->count_load_time +
+        (round_up ? muldiv64_round_up(next_time, NANOSECONDS_PER_SECOND,
+                                     PC98_PIT_FREQ)
+                  : muldiv64(next_time, NANOSECONDS_PER_SECOND,
+                             PC98_PIT_FREQ));
     if (next_time <= current_time) {
         next_time = current_time + 1;
     }

@@ -123,6 +123,7 @@ config PC98
     default y
     depends on I386
     select ISA_BUS
+    select PCI
     select PC98_I8259
     select PC98_PIT
     select PC98_SYS
@@ -133,6 +134,7 @@ config PC98
     select PC98_FDC
     select PC98_IDE
     select PC98_WAB
+    select VGA_CIRRUS
     select PC98_LGY98
     select PC98_WSS
     select VGA

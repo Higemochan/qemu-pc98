@@ -17,6 +17,6 @@
  * Attaches the remapped register ports and the display relay to the I/O space
  * and the linear framebuffer window to the system memory.
  */
-void pc98_wab_init(ISABus *bus);
+void pc98_wab_init(ISABus *bus, bool fixed_lfb);
 
 #endif

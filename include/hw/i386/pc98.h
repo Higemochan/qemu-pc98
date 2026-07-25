@@ -10,6 +10,8 @@
 
 #include "system/memory.h"
 
+typedef struct PCIBus PCIBus;
+
 /*
  * Display regions provided by the VGA device (or RAM placeholders until
  * the VGA model is wired up).  pc98-mem maps aliases of these into the
@@ -25,6 +27,27 @@ typedef struct Pc98VgaRegions {
 
 typedef struct Pc98MemState Pc98MemState;
 
+/* PCI host bridge for the PCI-equipped PC-9821 machines (pc98-pci). */
+#define TYPE_PC98_PCI_HOST "pc98-pcihost"
+
+/*
+ * Host bridge (dev0) config register 0x64: the D000-segment shadow control.
+ * Called by the PCI host bridge; opaque is the Pc98MemState.
+ */
+void pc98_mem_set_d000_shadow(void *opaque, uint8_t bits);
+
+/*
+ * Host bridge (dev0) config byte 0x69 bit 4: allow the Xa7 ITF to update
+ * the IDE probe bitmap latch at 0xf8e90.
+ */
+void pc98_mem_set_bios_probe_write(void *opaque, bool enable);
+
+/* Give the PCI host bridge the memory-controller state for reg 0x64. */
+void pc98_pci_set_d000_mem(void *mem);
+
+/* Return the root bus created by a realized PC-98 PCI host bridge. */
+PCIBus *pc98_pci_get_bus(DeviceState *host);
+
 /*
  * Set up the PC-98 memory controller: loads the ITF/BIOS ROM images,
  * builds the low-1MiB bank topology, the 16MB-space and top-of-4G
@@ -36,6 +59,8 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
                             uint64_t ram_size,
                             const Pc98VgaRegions *vga,
                             uint8_t hd_connect,
+                            bool has_pci,
+                            bool has_pegc,
                             void (*ems_select)(void *opaque, uint32_t value),
                             void *ems_opaque);
 
