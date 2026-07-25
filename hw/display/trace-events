@@ -229,3 +229,5 @@ apple_gfx_iosfc_map_memory_new_region(size_t i, void *region, uint64_t start, ui
 apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *f) "a=%p b=%p c=%p d=%p e=%p f=%p"
 apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
 apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
+pc98_coregraph_video_enable(uint8_t on) "video enable %u"
+pc98_coregraph_isa_window(uint64_t base, uint64_t size) "isa window base 0x%" PRIx64 " size 0x%" PRIx64
