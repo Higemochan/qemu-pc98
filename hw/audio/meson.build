@@ -9,6 +9,7 @@ system_ss.add(when: 'CONFIG_GUS', if_true: files('gus.c', 'gusemu_hal.c', 'gusem
 system_ss.add(when: 'CONFIG_HDA', if_true: files('intel-hda.c', 'hda-codec.c'))
 system_ss.add(when: 'CONFIG_MARVELL_88W8618', if_true: files('marvell_88w8618.c'))
 system_ss.add(when: 'CONFIG_PC98_WSS', if_true: files('pc98-wss.c'))
+system_ss.add(when: 'CONFIG_PC98_OPNA', if_true: files('pc98-opna.c', 'fmopn.c', 'ymdeltat.c', 'emu2149.c'))
 system_ss.add(when: 'CONFIG_PCSPK', if_true: files('pcspk.c'))
 system_ss.add(when: 'CONFIG_PL041', if_true: files('pl041.c', 'lm4549.c'))
 system_ss.add(when: 'CONFIG_SB16', if_true: files('sb16.c'))

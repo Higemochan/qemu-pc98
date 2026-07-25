@@ -33,6 +33,10 @@ config PC98_WSS
     depends on ISA_BUS
     select CS4231A
 
+config PC98_OPNA
+    bool
+    depends on ISA_BUS
+
 config HDA
     bool
     default y if PCI_DEVICES

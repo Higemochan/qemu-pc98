@@ -137,6 +137,7 @@ config PC98
     select VGA_CIRRUS
     select PC98_LGY98
     select PC98_WSS
+    select PC98_OPNA
     select VGA
 
 config PC98_WAB

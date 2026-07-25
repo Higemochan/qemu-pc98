@@ -61,3 +61,10 @@ virtio_snd_handle_event(void) "event queue callback called"
 virtio_snd_pcm_stream_flush(uint32_t stream) "flushing stream %"PRIu32
 virtio_snd_handle_tx_xfer(void) "tx queue callback called"
 virtio_snd_handle_rx_xfer(void) "rx queue callback called"
+
+# pc98-opna.c
+pc98_opna_reset(void) "reset"
+pc98_opna_irq(uint8_t level) "IRQ 3 level %u"
+pc98_opna_timer(unsigned ch, uint64_t usec) "timer %u -> %"PRIu64" us (0 = stop)"
+pc98_opna_id_read(uint8_t val) "sound ID 0x%02x"
+pc98_opna_rhythm_loaded(const char *path) "rhythm ROM loaded from %s"

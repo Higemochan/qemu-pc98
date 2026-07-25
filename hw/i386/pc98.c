@@ -35,6 +35,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/audio/pc98-wss.h"
+#include "hw/audio/pc98-opna.h"
 #include "hw/block/pc98-fdc.h"
 #include "hw/display/pc98-coregraph.h"
 #include "hw/display/pc98-vga.h"
@@ -204,7 +205,7 @@ static uint32_t pc98_ide_presence_read(void *opaque, uint32_t addr)
     return value;
 }
 
-/* Read-only straps sampled by the firmware: CPU mode, wait state, sound id. */
+/* Read-only straps sampled by the firmware: CPU mode, wait state. */
 static uint32_t pc98_cpu_mode_read(void *opaque, uint32_t addr)
 {
     return 0xec;
@@ -213,11 +214,6 @@ static uint32_t pc98_cpu_mode_read(void *opaque, uint32_t addr)
 static uint32_t pc98_wait_strap_read(void *opaque, uint32_t addr)
 {
     return 0x90;
-}
-
-static uint32_t pc98_sound_id_read(void *opaque, uint32_t addr)
-{
-    return 0x7f; /* no FM/PCM sound board attached yet */
 }
 
 /*
@@ -241,7 +237,6 @@ static const MemoryRegionPortio pc98_board_ports[] = {
     { 0x534,  1, 1, .read = pc98_cpu_mode_read,
                     .write = pc98_reset_latch_write },
     { 0x9894, 1, 1, .read = pc98_wait_strap_read },
-    { 0xa460, 1, 1, .read = pc98_sound_id_read },
     { 0xf070, 16, 1, .read = pc98_f07x_read },
     PORTIO_END_OF_LIST(),
 };
@@ -358,6 +353,13 @@ static void pc98_devices_init(Pc98MachineState *pms)
      * PC-98 DMA controller.
      */
     pc98_wss_init(isa_bus);
+
+    /*
+     * PC-9801-86 sound board (YM2608 OPNA + SSG) at 0x188-0x18E.  The FM
+     * timer interrupt is DIP-selectable on the real board; music drivers
+     * of the era (PLAY6 etc.) hook INT0 = IRQ3, so wire that.
+     */
+    pc98_opna_init(isa_bus, x86ms->gsi[3]);
 
     /*
      * PCI host bridge (pc98-pci only).  PC-98 uses Configuration
