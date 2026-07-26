@@ -381,8 +381,9 @@ static void pc98_devices_init(Pc98MachineState *pms)
             PCIDevice *coregraph =
                 pci_new(PCI_DEVFN(7, 0), TYPE_PC98_COREGRAPH);
 
-            /* Keep the secondary console addressable from HMP/QMP. */
+            /* Keep the shared GDC/Core-Graph console addressable by device. */
             DEVICE(coregraph)->id = g_strdup("coregraph");
+            pc98_coregraph_set_primary_vga(coregraph, pms->vga);
             pci_realize_and_unref(coregraph, pc98_pci_get_bus(host),
                                   &error_fatal);
         }

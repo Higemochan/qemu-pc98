@@ -61,9 +61,13 @@ typedef struct Pc98CoreGraphState {
     hwaddr cur_legacy_base;
     hwaddr isa_base;
     uint64_t isa_size;
+    Pc98VgaState *primary_vga;
+    bool display_active;
 } Pc98CoreGraphState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(Pc98CoreGraphState, PC98_COREGRAPH)
+
+static void coregraph_update_display(Pc98CoreGraphState *s);
 
 static hwaddr coregraph_legacy_base(uint8_t value)
 {
@@ -295,6 +299,7 @@ static void coregraph_control_write(void *opaque, hwaddr addr,
         s->regs[s->index] = value;
         trace_pc98_coregraph_control_write(s->index, value);
         coregraph_apply_mappings(s);
+        coregraph_update_display(s);
     }
 }
 
@@ -351,6 +356,7 @@ static void coregraph_video_enable_write(void *opaque, hwaddr addr,
     s->video_enable = value & 0x01;
     trace_pc98_coregraph_video_enable(s->video_enable);
     coregraph_apply_mappings(s);
+    coregraph_update_display(s);
 }
 
 /*
@@ -424,11 +430,15 @@ static void coregraph_reset(DeviceState *dev)
      */
     s->regs[1] = 0xe0;
     coregraph_apply_mappings(s);
+    coregraph_update_display(s);
 }
 
 static int coregraph_post_load(void *opaque, int version_id)
 {
-    coregraph_apply_mappings(opaque);
+    Pc98CoreGraphState *s = opaque;
+
+    coregraph_apply_mappings(s);
+    coregraph_update_display(s);
     return 0;
 }
 
@@ -490,6 +500,37 @@ static const GraphicHwOps coregraph_hw_ops = {
     .invalidate = coregraph_invalidate,
     .gfx_update = coregraph_gfx_update,
 };
+
+static void coregraph_update_display(Pc98CoreGraphState *s)
+{
+    bool active;
+
+    if (!s->primary_vga) {
+        return;
+    }
+
+    /*
+     * Real PC-9821 systems feed the GDC and Core-Graph outputs through one
+     * monitor relay.  ACLMM controls it with fixed-interface register 3 bit
+     * 1, while older WAB-compatible drivers use the video-enable latch at
+     * 0xFF82.  Model that relay by changing the producer behind the one QEMU
+     * graphic console instead of exposing two host windows.
+     */
+    active = (s->regs[3] & 0x02) || s->video_enable;
+    if (active == s->display_active) {
+        return;
+    }
+
+    s->display_active = active;
+    if (active) {
+        qemu_graphic_console_set_hwops(s->cirrus.vga.con,
+                                       &coregraph_hw_ops, s);
+        qemu_console_hw_invalidate(s->cirrus.vga.con);
+        qemu_console_hw_update(s->cirrus.vga.con);
+    } else {
+        pc98_vga_select_console(s->primary_vga);
+    }
+}
 
 static void coregraph_init_io_alias(MemoryRegion *alias, Object *owner,
                                     const char *name, MemoryRegion *source,
@@ -581,9 +622,23 @@ static void coregraph_realize(PCIDevice *dev, Error **errp)
     memory_region_init_alias(&s->isa_alias, owner, "coregraph-isa-window",
                              &c->cirrus_linear_io, 0, 2 * MiB);
 
-    c->vga.con = qemu_graphic_console_create(DEVICE(dev), 0,
-                                              &coregraph_hw_ops, s);
+    if (s->primary_vga) {
+        c->vga.con = pc98_vga_get_console(s->primary_vga);
+        object_property_set_link(OBJECT(c->vga.con), "device", OBJECT(dev),
+                                 &error_abort);
+    } else {
+        c->vga.con = qemu_graphic_console_create(DEVICE(dev), 0,
+                                                  &coregraph_hw_ops, s);
+    }
     coregraph_reset(DEVICE(dev));
+}
+
+void pc98_coregraph_set_primary_vga(PCIDevice *dev, Pc98VgaState *vga)
+{
+    Pc98CoreGraphState *s = PC98_COREGRAPH(dev);
+
+    assert(!DEVICE(dev)->realized);
+    s->primary_vga = vga;
 }
 
 static void coregraph_class_init(ObjectClass *klass, const void *data)

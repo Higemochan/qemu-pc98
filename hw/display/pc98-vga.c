@@ -4616,6 +4616,22 @@ static const GraphicHwOps pc98_vga_gfx_ops = {
     .gfx_update = update_display,
 };
 
+QemuConsole *pc98_vga_get_console(Pc98VgaState *opaque)
+{
+    VGAState *s = opaque;
+
+    return s->con;
+}
+
+void pc98_vga_select_console(Pc98VgaState *opaque)
+{
+    VGAState *s = opaque;
+
+    qemu_graphic_console_set_hwops(s->con, &pc98_vga_gfx_ops, s);
+    qemu_console_hw_invalidate(s->con);
+    qemu_console_hw_update(s->con);
+}
+
 /* font (based on Neko Project 2) */
 
 static void kanji_copy(uint8_t *dst, uint8_t *src, int from, int to)

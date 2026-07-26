@@ -10,6 +10,7 @@
 #ifndef HW_DISPLAY_PC98_VGA_H
 #define HW_DISPLAY_PC98_VGA_H
 
+#include "qemu/typedefs.h"
 #include "hw/i386/pc98.h"
 #include "system/memory.h"
 
@@ -24,6 +25,10 @@ typedef struct VGAState Pc98VgaState;
 Pc98VgaState *pc98_vga_init(MemoryRegion *system_io, qemu_irq irq,
                             bool has_pegc,
                             Pc98VgaRegions *regions);
+
+/* Let a board-level monitor relay reuse and switch back to the GDC console. */
+QemuConsole *pc98_vga_get_console(Pc98VgaState *s);
+void pc98_vga_select_console(Pc98VgaState *s);
 
 void pc98_vga_select_ems(void *opaque, uint32_t value);
 
