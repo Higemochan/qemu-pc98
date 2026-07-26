@@ -125,9 +125,12 @@ static bool pc98_a20_enabled(void)
     return (X86_CPU(first_cpu)->env.a20_mask >> 20) & 1;
 }
 
-static void pc98_a20_drive(bool enabled)
+static void pc98_a20_drive(Pc98MachineState *pms, bool enabled)
 {
     x86_cpu_set_a20(X86_CPU(first_cpu), enabled);
+    if (pms->mem) {
+        pc98_mem_set_a20_wrap(pms->mem, !enabled);
+    }
 }
 
 /*
@@ -142,7 +145,7 @@ static uint32_t pc98_a20_latch_read(void *opaque, uint32_t addr)
 
 static void pc98_a20_latch_write(void *opaque, uint32_t addr, uint32_t data)
 {
-    pc98_a20_drive(true);
+    pc98_a20_drive(opaque, true);
 }
 
 static uint32_t pc98_a20_cmd_read(void *opaque, uint32_t addr)
@@ -153,9 +156,9 @@ static uint32_t pc98_a20_cmd_read(void *opaque, uint32_t addr)
 static void pc98_a20_cmd_write(void *opaque, uint32_t addr, uint32_t data)
 {
     if (data == 0x02) {
-        pc98_a20_drive(true);
+        pc98_a20_drive(opaque, true);
     } else if (data == 0x03) {
-        pc98_a20_drive(false);
+        pc98_a20_drive(opaque, false);
     }
 }
 
@@ -170,6 +173,10 @@ static void pc98_soft_reset(Pc98MachineState *pms)
         qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
     } else {
         cpu_interrupt(first_cpu, CPU_INTERRUPT_INIT);
+        /* the INIT re-masks A20 in the CPU; keep the wrap window in step */
+        if (pms->mem) {
+            pc98_mem_set_a20_wrap(pms->mem, true);
+        }
     }
 }
 
@@ -434,6 +441,16 @@ static GlobalProperty pc98_compat_props[] = {
     { TYPE_X86_CPU, "pc98-a20-mask", "on" },
 };
 
+/*
+ * The PC-98 interrupt controller pair lives at I/O 0x00/0x08 with the
+ * cascade on IR7, none of which the in-kernel PC/AT model can express, so
+ * hardware accelerators must keep the irqchip in userspace.
+ */
+static bool pc98_get_kernel_irqchip_default(const MachineState *ms)
+{
+    return false;
+}
+
 static void pc98_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -441,6 +458,7 @@ static void pc98_class_init(ObjectClass *oc, const void *data)
 
     mc->init = pc98_machine_state_init;
     mc->reset = pc98_machine_reset;
+    mc->get_kernel_irqchip_default = pc98_get_kernel_irqchip_default;
 
     mc->family = "pc98";
     mc->desc = "NEC PC-9821";

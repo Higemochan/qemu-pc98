@@ -140,7 +140,8 @@ struct Pc98MemState {
     MemoryRegion e8000_ram;
     MemoryRegion f8000_rom;
     MemoryRegion f8000_ram;
-    MemoryRegion f8e90_latch; /* PCI: IDE probe bitmap over the BIOS window */
+    MemoryRegion probe_page;  /* PCI: page-sized window over 0xf8000 */
+    MemoryRegion a20_wrap;    /* 1 MiB wrap alias for hardware accelerators */
 
     MemoryRegion ram_mid;
     MemoryRegion ram_f00000;
@@ -166,6 +167,7 @@ struct Pc98MemState {
     uint8_t d000_shadow;      /* PCI reg 0x64: D000 shadow-RAM enable bits */
     uint8_t bios_probe_write; /* PCI config 0x69 bit 4 */
     uint8_t f8e90_reset;
+    uint8_t f8e90_value;      /* current IDE probe bitmap (the latch) */
 
     void (*ems_cb)(void *opaque, uint32_t value);
     void *ems_cb_arg;
@@ -197,6 +199,60 @@ static void mem_apply_window(Pc98MemState *s, int idx)
     memory_region_transaction_commit();
 }
 
+#define PROBE_PAGE_SIZE 4096
+
+/*
+ * Writes to the probe-page window.  Only the latch byte at 0xe90 is live
+ * (and only while config byte 0x69 bit 4 holds the window open); when the
+ * BIOS RAM shadow is paged in underneath, everything else is forwarded to
+ * it so the BIOS work bytes in this page keep working.  Plain ROM writes
+ * are discarded, as on hardware.
+ */
+static void probe_page_write(void *opaque, hwaddr addr, uint64_t val,
+                             unsigned size)
+{
+    Pc98MemState *s = opaque;
+    uint8_t *page = memory_region_get_ram_ptr(&s->probe_page);
+    bool shadow = s->top_bank == BANK_BIOS_TOP && s->bios_ram_gate;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        hwaddr off = addr + i;
+        uint8_t b = val >> (i * 8);
+
+        if (off == 0xe90) {
+            if (s->bios_probe_write) {
+                page[off] = b;
+            }
+        } else if (shadow) {
+            page[off] = b;
+            ((uint8_t *)memory_region_get_ram_ptr(s->ram))[0xf8000 + off] = b;
+        }
+    }
+    memory_region_flush_rom_device(&s->probe_page, addr, size);
+}
+
+static uint64_t probe_page_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Pc98MemState *s = opaque;
+    uint8_t *page = memory_region_get_ram_ptr(&s->probe_page);
+    uint64_t val = 0;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        val |= (uint64_t)page[addr + i] << (i * 8);
+    }
+    return val;
+}
+
+static const MemoryRegionOps probe_page_ops = {
+    .read = probe_page_read,
+    .write = probe_page_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 8,
+};
+
 /* apply the state of the 0xf8000 bank window */
 static void mem_apply_top_bank(Pc98MemState *s, uint32_t ram_src)
 {
@@ -217,13 +273,34 @@ static void mem_apply_top_bank(Pc98MemState *s, uint32_t ram_src)
          * Xa7 keeps the IDE probe bitmap in a one-byte latch at 0xf8e90.
          * The ITF writes it while BANK4 is visible by briefly opening config
          * byte 0x69 bit 4.  The IDE BIOS reads it later with BANK7 visible.
+         *
+         * The latch is modelled as a page-sized rom-device copy of the
+         * window: anything smaller would fragment the 0xf8000 page below
+         * the granularity a hardware accelerator can map, demoting every
+         * instruction fetch from this page (the BIOS keeps a timing loop
+         * at 0xf8e11) to per-instruction emulation.
          */
-        memory_region_set_readonly(&s->f8e90_latch,
-                                   !s->bios_probe_write);
-        memory_region_set_enabled(&s->f8e90_latch,
-                                  s->bios_probe_write ||
-                                  (s->top_bank == BANK_BIOS_TOP &&
-                                   s->ide_rom_gate));
+        bool on = s->bios_probe_write ||
+                  (s->top_bank == BANK_BIOS_TOP && s->ide_rom_gate);
+
+        if (on) {
+            uint8_t *page = memory_region_get_ram_ptr(&s->probe_page);
+
+            if (s->top_bank == BANK_BIOS_TOP && s->bios_ram_gate) {
+                memcpy(page,
+                       (uint8_t *)memory_region_get_ram_ptr(s->ram) + ram_src,
+                       PROBE_PAGE_SIZE);
+            } else {
+                memcpy(page,
+                       (uint8_t *)memory_region_get_ram_ptr(&s->rom) +
+                       s->top_bank * ROM_BANK_BYTES,
+                       PROBE_PAGE_SIZE);
+            }
+            page[0xe90] = s->f8e90_value;
+            memory_region_flush_rom_device(&s->probe_page, 0,
+                                           PROBE_PAGE_SIZE);
+        }
+        memory_region_set_enabled(&s->probe_page, on);
     }
 
     memory_region_transaction_commit();
@@ -307,23 +384,37 @@ void pc98_mem_set_bios_probe_write(void *opaque, bool enable)
 {
     Pc98MemState *s = opaque;
 
-    if (s->bios_probe_write != enable) {
-        if (s->bios_probe_write && !enable) {
-            uint8_t *probe =
-                memory_region_get_ram_ptr(&s->f8e90_latch);
-
-            /*
-             * The ITF writes its candidate-drive mask here.  The chipset
-             * returns the actually populated IDE slots in the low nibble;
-             * otherwise Xa7 probes empty channels indefinitely.  This is the
-             * PCI-firmware equivalent of the hd_connect value that the older
-             * PC-98 memory model exposed at the same physical address.
-             */
-            *probe = (*probe & 0xf0) | (s->hd_mask & 0x0f);
-        }
-        s->bios_probe_write = enable;
-        mem_apply_top_bank(s, 0xf8000);
+    if (s->bios_probe_write == enable) {
+        return;
     }
+    if (s->bios_probe_write && !enable && s->has_pci) {
+        const uint8_t *page = memory_region_get_ram_ptr(&s->probe_page);
+
+        /*
+         * The ITF wrote its candidate-drive mask through the window.  The
+         * chipset returns the actually populated IDE slots in the low
+         * nibble; otherwise Xa7 probes empty channels indefinitely.  This
+         * is the PCI-firmware equivalent of the hd_connect value that the
+         * older PC-98 memory model exposed at the same physical address.
+         */
+        s->f8e90_value = (page[0xe90] & 0xf0) | (s->hd_mask & 0x0f);
+    }
+    s->bios_probe_write = enable;
+    mem_apply_top_bank(s, 0xf8000);
+}
+
+/*
+ * PC-98 masks A20 by wrapping the whole address space at 1 MiB.  TCG models
+ * that exactly in the CPU (the pc98-a20-mask property), but a hardware
+ * accelerator never sees the CPU's address mask, so mirror the only window
+ * real-mode software can actually reach (segment arithmetic tops out at
+ * 0x10ffef) with an alias of the first megabyte.
+ */
+void pc98_mem_set_a20_wrap(void *opaque, bool wrap)
+{
+    Pc98MemState *s = opaque;
+
+    memory_region_set_enabled(&s->a20_wrap, wrap);
 }
 
 /* fill in the BIOS work area when the writable BIOS RAM copy is paged in */
@@ -789,10 +880,9 @@ static void pc98_mem_reset(void *opaque)
     memory_region_set_enabled(&s->e8000_ram, false);
 
     s->bios_probe_write = 0;
-    if (s->has_pci) {
-        *(uint8_t *)memory_region_get_ram_ptr(&s->f8e90_latch) =
-            s->f8e90_reset;
-    }
+    s->f8e90_value = s->f8e90_reset;
+    /* every CPU reset re-masks A20 on PC-98 (see x86_cpu_reset_hold) */
+    memory_region_set_enabled(&s->a20_wrap, true);
 
     s->top_bank = BANK_ITF;
     mem_apply_top_bank(s, 0xf8000);
@@ -990,22 +1080,26 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
     memory_region_set_enabled(&s->f8000_ram, false);
 
     if (has_pci) {
-        /*
-         * Xa7 config byte 0x69 bit 4 exposes this byte for the ITF's write;
-         * after the BIOS bank is selected it remains visible read-only to
-         * the IDE option ROM.
-         */
-        memory_region_init_ram(&s->f8e90_latch, NULL,
-                               "pc98.f8e90-latch", 1, &error_fatal);
-        *(uint8_t *)memory_region_get_ram_ptr(&s->f8e90_latch) =
-            s->f8e90_reset;
-        memory_region_add_subregion_overlap(&s->lowmem, 0xf8e90,
-                                            &s->f8e90_latch, 4);
-        memory_region_set_readonly(&s->f8e90_latch, true);
-        memory_region_set_enabled(&s->f8e90_latch, false);
+        /* see the comment in mem_apply_top_bank() */
+        memory_region_init_rom_device(&s->probe_page, NULL,
+                                      &probe_page_ops, s,
+                                      "pc98.f8000-probe", PROBE_PAGE_SIZE,
+                                      &error_fatal);
+        memory_region_add_subregion_overlap(&s->lowmem, 0xf8000,
+                                            &s->probe_page, 4);
+        memory_region_set_enabled(&s->probe_page, false);
+        s->f8e90_value = s->f8e90_reset;
     }
 
     memory_region_add_subregion(system_memory, 0, &s->lowmem);
+
+    /* A20 wrap window for hardware accelerators; see pc98_mem_set_a20_wrap */
+    memory_region_init_alias(&s->a20_wrap, NULL, "pc98.a20-wrap",
+                             &s->lowmem, 0, 0x100000);
+    memory_region_add_subregion_overlap(system_memory, 0x100000,
+                                        &s->a20_wrap, 1);
+    /* the CPU comes out of reset with A20 masked; match it */
+    memory_region_set_enabled(&s->a20_wrap, true);
 
     /* 1 MiB .. 15 MiB RAM */
     memory_region_init_alias(&s->ram_mid, NULL, "pc98.ram-mid",

@@ -41,6 +41,7 @@ void pc98_mem_set_d000_shadow(void *opaque, uint8_t bits);
  * the IDE probe bitmap latch at 0xf8e90.
  */
 void pc98_mem_set_bios_probe_write(void *opaque, bool enable);
+void pc98_mem_set_a20_wrap(void *opaque, bool wrap);
 
 /* Give the PCI host bridge the memory-controller state for reg 0x64. */
 void pc98_pci_set_d000_mem(void *mem);
