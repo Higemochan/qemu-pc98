@@ -306,6 +306,7 @@ static uint32_t pc98_kbd_data_read(void *opaque, uint32_t addr)
 static void pc98_kbd_ctl_write(void *opaque, uint32_t addr, uint32_t value)
 {
     Pc98KbdState *s = opaque;
+    bool old_rts = s->rts;
 
     switch (s->cfg_phase) {
     case CFG_AWAIT_MODE:
@@ -336,6 +337,17 @@ static void pc98_kbd_ctl_write(void *opaque, uint32_t addr, uint32_t value)
         s->tx_enabled = value & 0x01;
         break;
     }
+    /*
+     * A reply may have been queued while RTS held the receive line off.
+     * The timer then observes RTS and stops without consuming the FIFO.
+     * Restart it when the host releases RTS; otherwise that reply remains
+     * stuck until some unrelated later command happens to enqueue a byte.
+     */
+    if (old_rts && !s->rts && s->fifo_len > 0) {
+        timer_mod(s->rx_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  KBD_RX_INTERVAL_NS);
+    }
 }
 
 static uint32_t pc98_kbd_status_read(void *opaque, uint32_t addr)
@@ -353,7 +365,7 @@ static uint32_t pc98_kbd_status_read(void *opaque, uint32_t addr)
  * Receive pump: hand the next queued byte to the host if the line is enabled
  * and not held off by RTS.  A byte arriving while the previous one is still
  * unread raises the overrun flag.  While RTS is asserted the pump idles and is
- * restarted by the next enqueue.
+ * restarted when RTS is released (or by a later enqueue).
  */
 static void pc98_kbd_rx_tick(void *opaque)
 {

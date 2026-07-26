@@ -342,6 +342,11 @@ static void mem_patch_bios_workarea(Pc98MemState *s)
     ram[0x5b3] &= ~0xe0;
     /* system clock: 5MHz -> 0x24, 8MHz -> 0xa4 */
     ram[0x501] = 0x24;
+    /*
+     * The emulated keyboard implements the PC-9801-119/PC-9821 extended
+     * command set.  NEC NTDETECT uses this flag to select PC98_106KEY.
+     */
+    ram[0x481] |= 0x40;
 
     /*
      * ram[0x457] selects the IDE geometry *class* the IDE BIOS uses for INIT
@@ -500,8 +505,17 @@ static uint32_t mem_win1_read(void *opaque, uint32_t addr)
 static void mem_romgate_write(void *opaque, uint32_t addr, uint32_t data)
 {
     Pc98MemState *s = opaque;
+    bool old_ide_rom_gate = s->ide_rom_gate;
 
     s->ide_rom_gate = !!(data & 0x10);
+    /*
+     * Xa7 firmware does not necessarily enable the writable BIOS-copy gate.
+     * Its late IDE-ROM gate-in is the last common point before boot, after
+     * POST has finished initialising (and clearing) the BIOS work area.
+     */
+    if (s->has_pci && !old_ide_rom_gate && s->ide_rom_gate) {
+        mem_patch_bios_workarea(s);
+    }
     mem_apply_dwin(s);
     if (s->has_pci) {
         mem_apply_top_bank(s, 0xf8000);

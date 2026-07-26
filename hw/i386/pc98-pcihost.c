@@ -121,6 +121,68 @@ static const TypeInfo pc98_pmc_info = {
 };
 
 /* -------------------------------------------------------------------- */
+/* NEC PCI-to-C-bus bridge (device 6)                                   */
+/* -------------------------------------------------------------------- */
+
+#define TYPE_PC98_CBUS_BRIDGE "pc98-cbus-bridge"
+
+struct Pc98CbusBridgeState {
+    PCIDevice parent_obj;
+};
+
+OBJECT_DECLARE_SIMPLE_TYPE(Pc98CbusBridgeState, PC98_CBUS_BRIDGE)
+
+static void pc98_cbus_bridge_realize(PCIDevice *dev, Error **errp)
+{
+    static const uint8_t bridge_regs_40_63[] = {
+        0x10, 0x00, 0xef, 0x00, 0xfa, 0xff, 0xfb, 0xff,
+        0xfe, 0xff, 0xfe, 0xff, 0xff, 0xff, 0x00, 0x00,
+        0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x09, 0x0a, 0x0b, 0x00, 0x0d, 0x00, 0x00,
+        0x03, 0x05, 0x06, 0x0c,
+    };
+
+    /*
+     * These reset values match the on-board NEC PCI-to-C-bus bridge
+     * exposed by NP21/W.  In particular, Windows NT-family PC-98 kernels
+     * use this function to discover the legacy C-bus/ISA side of the
+     * machine.  Without it, IoReportResourceForDetection() rejects every
+     * ISA I/O resource and the native ATAPI driver cannot start.
+     */
+    pci_set_word(dev->config + PCI_COMMAND, 0x010f);
+    pci_set_word(dev->config + PCI_STATUS, 0x0200);
+    dev->config[PCI_INTERRUPT_PIN] = 1;
+    memcpy(dev->config + 0x40, bridge_regs_40_63,
+           sizeof(bridge_regs_40_63));
+}
+
+static void pc98_cbus_bridge_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->realize = pc98_cbus_bridge_realize;
+    k->vendor_id = PCI_VENDOR_ID_NEC;
+    k->device_id = 0x0001;
+    k->revision = 0x01;
+    k->class_id = PCI_CLASS_BRIDGE_OTHER;
+    dc->desc = "NEC PCI-to-C-bus bridge";
+    dc->user_creatable = false;
+    dc->hotpluggable = false;
+}
+
+static const TypeInfo pc98_cbus_bridge_info = {
+    .name          = TYPE_PC98_CBUS_BRIDGE,
+    .parent        = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(Pc98CbusBridgeState),
+    .class_init    = pc98_cbus_bridge_class_init,
+    .interfaces = (const InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
+};
+
+/* -------------------------------------------------------------------- */
 /* Host bridge                                                          */
 /* -------------------------------------------------------------------- */
 
@@ -248,6 +310,9 @@ static void pc98_pcihost_realize(DeviceState *dev, Error **errp)
 
     /* device 0: host bridge / PMC */
     pci_create_simple(b, PCI_DEVFN(0, 0), TYPE_PC98_PMC);
+
+    /* device 6: on-board bridge from PCI to the legacy C-bus */
+    pci_create_simple(b, PCI_DEVFN(6, 0), TYPE_PC98_CBUS_BRIDGE);
 }
 
 static void pc98_pcihost_class_init(ObjectClass *klass, const void *data)
@@ -270,6 +335,7 @@ static const TypeInfo pc98_pcihost_info = {
 static void pc98_pcihost_register_types(void)
 {
     type_register_static(&pc98_pmc_info);
+    type_register_static(&pc98_cbus_bridge_info);
     type_register_static(&pc98_pcihost_info);
 }
 type_init(pc98_pcihost_register_types)
