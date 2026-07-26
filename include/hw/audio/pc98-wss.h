@@ -15,7 +15,8 @@
 /*
  * Create the PC-98 built-in WSS (Windows Sound System / Mate-X PCM), a
  * wrapper around the shared CS4231A codec mapped onto the PC-98 port block
- * at 0x0F40.  The routing is hardwired to IRQ12 (INT5) and DMA channel 1.
+ * at 0x0F40.  It powers on at IRQ12 (INT5)/DMA1 and supports the resource
+ * selection register used by NEC's Windows Plug and Play driver.
  */
 void pc98_wss_init(ISABus *bus);
 

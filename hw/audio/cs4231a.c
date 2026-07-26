@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include "hw/audio/model.h"
 #include "qemu/audio.h"
+#include "hw/audio/cs4231a.h"
 #include "hw/core/irq.h"
 #include "hw/isa/isa.h"
 #include "hw/core/qdev-properties.h"
@@ -62,7 +63,6 @@ static struct {
 #define CS_REGS 16
 #define CS_DREGS 32
 
-#define TYPE_CS4231A "cs4231a"
 typedef struct CSState CSState;
 DECLARE_INSTANCE_CHECKER(CSState, CS4231A,
                          TYPE_CS4231A)
@@ -605,6 +605,41 @@ static int cs_dma_read (void *opaque, int nchan, int dma_pos, int dma_len)
     }
 
     return dma_pos;
+}
+
+void cs4231a_set_resources(ISADevice *dev, uint32_t irq, uint32_t dma)
+{
+    CSState *s = CS4231A(dev);
+    ISABus *bus = isa_bus_from_device(dev);
+    IsaDmaClass *k = ISADMA_GET_CLASS(s->isa_dma);
+    bool irq_pending = s->regs[Status] & INT;
+    bool dma_running = s->dma_running;
+
+    g_assert(irq < ISA_NUM_IRQS);
+    g_assert(dma < 4);
+
+    if (s->irq != irq) {
+        if (irq_pending) {
+            qemu_irq_lower(s->pic);
+        }
+        s->irq = irq;
+        s->pic = isa_bus_get_irq(bus, irq);
+        if (irq_pending) {
+            qemu_irq_raise(s->pic);
+        }
+    }
+
+    if (s->dma != dma) {
+        if (dma_running) {
+            k->release_DREQ(s->isa_dma, s->dma);
+        }
+        k->register_channel(s->isa_dma, s->dma, NULL, NULL);
+        s->dma = dma;
+        k->register_channel(s->isa_dma, s->dma, cs_dma_read, s);
+        if (dma_running) {
+            k->hold_DREQ(s->isa_dma, s->dma);
+        }
+    }
 }
 
 static int cs4231a_pre_load (void *opaque)

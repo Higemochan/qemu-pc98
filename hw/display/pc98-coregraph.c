@@ -373,7 +373,7 @@ static void coregraph_video_enable_write(void *opaque, hwaddr addr,
 /*
  * NEC's PC-98 display drivers use an all-zero 8x8 monochrome pattern
  * as a solid foreground brush.  Standard Alpine semantics select the
- * background colour for zero bits, but Core-Graph pattern is all
+ * background colour for zero bits, but PC98 Core-Graph pattern as all
  * ones.  Substitute the pattern only while the synchronous
  * video-to-video BLT executes, leaving guest VRAM and the reusable
  * Cirrus implementation unchanged.

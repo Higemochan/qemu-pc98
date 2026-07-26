@@ -347,19 +347,19 @@ static void pc98_devices_init(Pc98MachineState *pms)
     pc98_lgy98_init(isa_bus, x86ms->gsi[6]);
 
     /*
-     * Built-in WSS / Mate-X PCM (CS4231A codec, IRQ12/DMA1).  Both resolve
-     * through the ISA bus: isa_bus_register_input_irqs() above wires the
-     * i8259 inputs (so IRQ12 -> gsi[12]) and pc98_dma_init() registered the
-     * PC-98 DMA controller.
+     * Built-in WSS / Mate-X PCM (CS4231A codec, initially IRQ12/DMA1).
+     * Firmware and PnP software may change both resources through 0x0f40.
+     * They resolve through the ISA bus and the PC-98 DMA controller.
      */
     pc98_wss_init(isa_bus);
 
     /*
-     * PC-9801-86 sound board (YM2608 OPNA + SSG) at 0x188-0x18E.  The FM
-     * timer interrupt is DIP-selectable on the real board; music drivers
-     * of the era (PLAY6 etc.) hook INT0 = IRQ3, so wire that.
+     * PC-9801-86 sound board (YM2608 OPNA + SSG) at 0x188-0x18E.  The Xa7
+     * firmware programs the built-in WSS for IRQ3, so use the 86 board's
+     * alternate INT5 setting (IRQ12) to keep the two sound interrupt sources
+     * separate.
      */
-    pc98_opna_init(isa_bus, x86ms->gsi[3]);
+    pc98_opna_init(isa_bus, x86ms->gsi[12]);
 
     /*
      * PCI host bridge (pc98-pci only).  PC-98 uses Configuration

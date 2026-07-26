@@ -16,7 +16,8 @@
  *   0x0F46  RO   CS4231 Status                  (codec offset 2)
  *   0x0F47  R/W  CS4231 PIO Data                (codec offset 3)
  *
- * The routing is fixed to IRQ12 (PC-98 INT5) and DMA channel 1.
+ * The power-on routing is IRQ12 (PC-98 INT5) and DMA channel 1.  Software
+ * can select another supported route through the configuration latch.
  *
  * Rather than re-implement the codec, this device instantiates the shared
  * CS4231A with iobase=0x0F44/irq=12/dma=1, which lines its four contiguous
@@ -47,18 +48,13 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/audio.h"
+#include "hw/audio/cs4231a.h"
 #include "hw/audio/pc98-wss.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/isa/isa.h"
+#include "migration/vmstate.h"
 #include "system/ioport.h"
 #include "qom/object.h"
-
-/*
- * The shared CS4231A codec (hw/audio/cs4231a.c) does not export a public
- * header, but its QOM type name and its "iobase"/"irq"/"dma" properties are
- * stable; wrap it by name.
- */
-#define TYPE_CS4231A            "cs4231a"
 
 /* PC-98 WSS port block. */
 #define PC98_WSS_IOBASE         0x0f40
@@ -66,7 +62,7 @@
 #define PC98_WSS_SOUND_ID       (PC98_WSS_IOBASE + 3)   /* 0x0F43 RO  */
 #define PC98_WSS_CODEC_BASE     (PC98_WSS_IOBASE + 4)   /* 0x0F44 codec */
 
-/* Fixed board wiring: IRQ12 (INT5), DMA channel 1. */
+/* Power-on routing: IRQ12 (INT5), DMA channel 1. */
 #define PC98_WSS_CODEC_IRQ      12
 #define PC98_WSS_CODEC_DMA      1
 
@@ -92,11 +88,42 @@ struct Pc98WssState {
 };
 
 /*
- * 0x0F40 IRQ/DMA configuration register.  The board routing is hardwired to
- * IRQ12/DMA1 in this model, so we simply latch whatever the guest writes and
- * report it back: the driver's auto-detect writes the IRQ12/DMA1 field values
- * and re-reads them, and the fixed routing is left untouched.
+ * The register encoding follows the NEC DOS driver: IRQ field 1/2/3/4
+ * selects IRQ3/5/10/12, while DMA field 1/2/3 (and the corresponding
+ * values with bit 2 set) selects DMA0/1/3.  Bit 6 does not latch on
+ * the Mate-X PCM implementation.
  */
+static const int8_t pc98_wss_irqs[8] = {
+    -1, 3, 5, 10, 12, -1, -1, -1,
+};
+
+static const int8_t pc98_wss_dmas[8] = {
+    -1, 0, 1, 3, -1, 0, 1, 3,
+};
+
+static void pc98_wss_apply_config(Pc98WssState *s)
+{
+    int irq = pc98_wss_irqs[(s->cfg >> 3) & 7];
+    int dma = pc98_wss_dmas[s->cfg & 7];
+
+    /*
+     * Configuration software probes invalid encodings.  Preserve the latch
+     * value for readback, but leave the last usable route connected until
+     * both fields select valid resources.
+     */
+    if (s->codec && irq >= 0 && dma >= 0) {
+        cs4231a_set_resources(s->codec, irq, dma);
+    }
+}
+
+static void pc98_wss_reset(DeviceState *dev)
+{
+    Pc98WssState *s = PC98_WSS(dev);
+
+    s->cfg = PC98_WSS_CFG_DEFAULT;
+    pc98_wss_apply_config(s);
+}
+
 static uint32_t pc98_wss_cfg_read(void *opaque, uint32_t addr)
 {
     Pc98WssState *s = opaque;
@@ -108,7 +135,8 @@ static void pc98_wss_cfg_write(void *opaque, uint32_t addr, uint32_t val)
 {
     Pc98WssState *s = opaque;
 
-    s->cfg = val & 0xff;
+    s->cfg = val & ~0x40;
+    pc98_wss_apply_config(s);
 }
 
 /* 0x0F43 Sound ID (read only); writes are ignored. */
@@ -166,6 +194,7 @@ static void pc98_wss_realize(DeviceState *dev, Error **errp)
         s->codec = NULL;
     } else {
         s->codec = codec;
+        pc98_wss_apply_config(s);
     }
 
     isa_register_portio_list(isadev, &s->portio, 0, pc98_wss_portio, s,
@@ -176,20 +205,37 @@ static const Property pc98_wss_properties[] = {
     DEFINE_AUDIO_PROPERTIES(Pc98WssState, audio_be),
 };
 
+static int pc98_wss_post_load(void *opaque, int version_id)
+{
+    Pc98WssState *s = opaque;
+
+    pc98_wss_apply_config(s);
+    return 0;
+}
+
+static const VMStateDescription vmstate_pc98_wss = {
+    .name = "pc98-wss",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = pc98_wss_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(cfg, Pc98WssState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void pc98_wss_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = pc98_wss_realize;
+    device_class_set_legacy_reset(dc, pc98_wss_reset);
     device_class_set_props(dc, pc98_wss_properties);
     set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->desc = "NEC PC-98 built-in WSS (Mate-X PCM, CS4231A)";
     /* Board-embedded device: created by the pc98 machine, not by the user. */
     dc->user_creatable = false;
-    /*
-     * No vmstate: the wrapped CS4231A migrates itself, and the 0x0F40 latch
-     * is a fixed strap re-read/rewritten by the driver's auto-detect.
-     */
+    dc->vmsd = &vmstate_pc98_wss;
 }
 
 static const TypeInfo pc98_wss_info = {
