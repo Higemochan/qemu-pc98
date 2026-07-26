@@ -30,6 +30,11 @@
 #define COREGRAPH_LFB_SIZE        (1 * MiB)
 #define COREGRAPH_LEGACY_SIZE     0x8000
 #define COREGRAPH_MMIO_OFFSET     ((4 * MiB) - 256)
+#define COREGRAPH_MMIO_INTERNAL   (COREGRAPH_LFB_SIZE - 256)
+
+#define COREGRAPH_BLT_RESET       0x04
+#define COREGRAPH_BLT_START       0x02
+#define COREGRAPH_BLT_SOLID_BRUSH 0xc0
 
 typedef struct Pc98CoreGraphState {
     PCIDevice parent_obj;
@@ -48,6 +53,7 @@ typedef struct Pc98CoreGraphState {
     MemoryRegion mmio_alias;
     MemoryRegion legacy_alias;
     MemoryRegion isa_alias;
+    MemoryRegion isa_cursor;
 
     uint8_t index;
     uint8_t regs[5];
@@ -210,6 +216,7 @@ static void coregraph_apply_mappings(Pc98CoreGraphState *s)
     }
 
     if (s->isa_mapped) {
+        memory_region_del_subregion(system_memory, &s->isa_cursor);
         memory_region_del_subregion(system_memory, &s->isa_alias);
         s->isa_mapped = false;
     }
@@ -217,6 +224,10 @@ static void coregraph_apply_mappings(Pc98CoreGraphState *s)
         memory_region_set_size(&s->isa_alias, isa_size);
         memory_region_add_subregion_overlap(system_memory, isa_base,
                                             &s->isa_alias, 2);
+        memory_region_add_subregion_overlap(system_memory,
+                                            isa_base +
+                                            COREGRAPH_MMIO_INTERNAL,
+                                            &s->isa_cursor, 3);
         s->isa_mapped = true;
         if (s->isa_base != isa_base || s->isa_size != isa_size) {
             trace_pc98_coregraph_isa_window(isa_base, isa_size);
@@ -360,6 +371,107 @@ static void coregraph_video_enable_write(void *opaque, hwaddr addr,
 }
 
 /*
+ * NEC's PC-98 display drivers use an all-zero 8x8 monochrome pattern
+ * as a solid foreground brush.  Standard Alpine semantics select the
+ * background colour for zero bits, but Core-Graph pattern is all
+ * ones.  Substitute the pattern only while the synchronous
+ * video-to-video BLT executes, leaving guest VRAM and the reusable
+ * Cirrus implementation unchanged.
+ */
+static bool coregraph_begin_solid_brush(Pc98CoreGraphState *s,
+                                        uint32_t *pattern_addr,
+                                        uint8_t saved[8])
+{
+    CirrusVGAState *c = &s->cirrus;
+    uint32_t addr;
+    int i;
+
+    if (c->vga.gr[0x30] != COREGRAPH_BLT_SOLID_BRUSH) {
+        return false;
+    }
+
+    addr = c->vga.gr[0x2c] |
+           (c->vga.gr[0x2d] << 8) |
+           (c->vga.gr[0x2e] << 16);
+    addr &= c->cirrus_addr_mask;
+
+    /*
+     * The reusable core aligns an 8-bpp video-memory pattern to 64 bytes
+     * before reading its eight monochrome rows.
+     */
+    addr &= ~63U;
+    if (addr + 8 > c->real_vram_size) {
+        return false;
+    }
+
+    for (i = 0; i < 8; i++) {
+        if (c->vga.vram_ptr[addr + i] != 0x00) {
+            return false;
+        }
+    }
+
+    memcpy(saved, c->vga.vram_ptr + addr, 8);
+    memset(c->vga.vram_ptr + addr, 0xff, 8);
+    *pattern_addr = addr;
+    trace_pc98_coregraph_solid_brush(addr, c->cirrus_shadow_gr1);
+    return true;
+}
+
+static void coregraph_end_solid_brush(Pc98CoreGraphState *s,
+                                      uint32_t pattern_addr,
+                                      const uint8_t saved[8],
+                                      bool active)
+{
+    if (active) {
+        memcpy(s->cirrus.vga.vram_ptr + pattern_addr, saved, 8);
+    }
+}
+
+/*
+ * A start value can also clear BLT reset in the same GR31 write.  The
+ * reusable core handles reset and start as mutually exclusive edges, while
+ * NEC's Windows 95 driver relies on both taking effect.  Split that combined
+ * transition into a reset-clear write followed by the requested start.
+ */
+static void coregraph_blt_status_write(Pc98CoreGraphState *s,
+                                       MemoryRegion *target,
+                                       hwaddr target_addr,
+                                       uint8_t value)
+{
+    CirrusVGAState *c = &s->cirrus;
+    uint8_t old = c->vga.gr[0x31];
+    uint8_t modeext = c->vga.gr[0x33];
+    uint8_t saved[8];
+    uint32_t pattern_addr = 0;
+    bool brush;
+
+    if ((old & COREGRAPH_BLT_RESET) &&
+        !(value & COREGRAPH_BLT_RESET) &&
+        (value & COREGRAPH_BLT_START)) {
+        memory_region_dispatch_write(target, target_addr,
+                                     value & ~COREGRAPH_BLT_START,
+                                     MO_8, MEMTXATTRS_UNSPECIFIED);
+        trace_pc98_coregraph_blt_reset_start(old, value);
+    }
+
+    brush = (value & COREGRAPH_BLT_START) &&
+            coregraph_begin_solid_brush(s, &pattern_addr, saved);
+    /*
+     * GR33 is a GD5446 extension.  The GD5440 stores the register value for
+     * readback but does not apply it to BitBLT; NEC's Windows 95 driver uses
+     * 0xff as its "no extension" value.  Keep the guest-visible register,
+     * while presenting the GD5440 execution semantics to the reusable core.
+     */
+    if (value & COREGRAPH_BLT_START) {
+        c->vga.gr[0x33] = 0;
+    }
+    memory_region_dispatch_write(target, target_addr, value, MO_8,
+                                 MEMTXATTRS_UNSPECIFIED);
+    c->vga.gr[0x33] = modeext;
+    coregraph_end_solid_brush(s, pattern_addr, saved, brush);
+}
+
+/*
  * Relocated VGA registers 0xCA0-0xCAF (VGA 0x3C0-0x3CF).  A plain alias
  * would do for the data path, but SR07 (0xCA4/0xCA5) and GR0B (0xCAE/0xCAF)
  * writes move the ISA VRAM aperture, so forward through a wrapper and
@@ -382,9 +494,15 @@ static void coregraph_vga_io_write(void *opaque, hwaddr addr,
 {
     Pc98CoreGraphState *s = opaque;
 
-    memory_region_dispatch_write(&s->cirrus.cirrus_vga_io, addr + 0x10,
-                                 value, size_memop(size) | MO_LE,
-                                 MEMTXATTRS_UNSPECIFIED);
+    if (size == 1 && addr == 0x0f &&
+        s->cirrus.vga.gr_index == 0x31) {
+        coregraph_blt_status_write(s, &s->cirrus.cirrus_vga_io,
+                                   addr + 0x10, value);
+    } else {
+        memory_region_dispatch_write(&s->cirrus.cirrus_vga_io, addr + 0x10,
+                                     value, size_memop(size) | MO_LE,
+                                     MEMTXATTRS_UNSPECIFIED);
+    }
     coregraph_apply_mappings(s);
 }
 
@@ -398,6 +516,126 @@ static const MemoryRegionOps coregraph_vga_io_ops = {
      * byte-wide, so ask the memory core to split wider accesses instead of
      * rejecting them as invalid.
      */
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
+/*
+ * Core-Graph keeps the top 256 bytes of its one-MiB framebuffer as VRAM for
+ * the hardware cursor.  BitBLT MMIO is a separate board-level window at
+ * linear_base + 4 MiB - 256.  The generic Cirrus linear region overlays MMIO
+ * on its own final 256 bytes, so it cannot be exposed directly as the board
+ * LFB.  Preserve the other important Core-Graph behavior: while a
+ * system-source BLT is active, writes anywhere in this aperture feed the
+ * Cirrus source FIFO instead of VRAM.
+ */
+static uint64_t coregraph_linear_read(void *opaque, hwaddr addr,
+                                      unsigned size)
+{
+    Pc98CoreGraphState *s = opaque;
+    CirrusVGAState *c = &s->cirrus;
+    uint8_t sr17 = c->vga.sr[0x17];
+    uint64_t value = 0xff;
+
+    /*
+     * Preserve the reusable core's GR0B address transforms and extended
+     * write modes, but suppress its final-256-byte MMIO overlay.  Core-Graph
+     * exposes those registers only in its separate 4 MiB - 256 window.
+     */
+    addr &= c->cirrus_addr_mask;
+    c->vga.sr[0x17] &= ~0x04;
+    memory_region_dispatch_read(&c->cirrus_linear_io, addr, &value,
+                                MO_8, MEMTXATTRS_UNSPECIFIED);
+    c->vga.sr[0x17] = sr17;
+    return value;
+}
+
+static void coregraph_linear_write(void *opaque, hwaddr addr,
+                                   uint64_t value, unsigned size)
+{
+    Pc98CoreGraphState *s = opaque;
+    CirrusVGAState *c = &s->cirrus;
+    uint8_t sr17 = c->vga.sr[0x17];
+
+    addr &= c->cirrus_addr_mask;
+    c->vga.sr[0x17] &= ~0x04;
+    memory_region_dispatch_write(&c->cirrus_linear_io, addr, value,
+                                 MO_8, MEMTXATTRS_UNSPECIFIED);
+    c->vga.sr[0x17] = sr17;
+}
+
+static const MemoryRegionOps coregraph_linear_ops = {
+    .read = coregraph_linear_read,
+    .write = coregraph_linear_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
+static uint64_t coregraph_cursor_read(void *opaque, hwaddr addr,
+                                      unsigned size)
+{
+    Pc98CoreGraphState *s = opaque;
+
+    return s->cirrus.vga.vram_ptr[COREGRAPH_MMIO_INTERNAL + addr];
+}
+
+static void coregraph_cursor_write(void *opaque, hwaddr addr,
+                                   uint64_t value, unsigned size)
+{
+    Pc98CoreGraphState *s = opaque;
+    uint32_t vram_addr = COREGRAPH_MMIO_INTERNAL + addr;
+
+    s->cirrus.vga.vram_ptr[vram_addr] = value;
+    memory_region_set_dirty(&s->cirrus.vga.vram, vram_addr, 1);
+}
+
+static const MemoryRegionOps coregraph_cursor_ops = {
+    .read = coregraph_cursor_read,
+    .write = coregraph_cursor_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
+static uint64_t coregraph_mmio_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Pc98CoreGraphState *s = opaque;
+    uint64_t value = 0xff;
+
+    memory_region_dispatch_read(&s->cirrus.cirrus_linear_io,
+                                COREGRAPH_MMIO_INTERNAL + addr,
+                                &value, size_memop(size) | MO_LE,
+                                MEMTXATTRS_UNSPECIFIED);
+    return value;
+}
+
+static void coregraph_mmio_write(void *opaque, hwaddr addr,
+                                 uint64_t value, unsigned size)
+{
+    Pc98CoreGraphState *s = opaque;
+
+    if (size == 1 && addr == 0x40) {
+        coregraph_blt_status_write(s, &s->cirrus.cirrus_linear_io,
+                                   COREGRAPH_MMIO_INTERNAL + addr, value);
+    } else {
+        memory_region_dispatch_write(&s->cirrus.cirrus_linear_io,
+                                     COREGRAPH_MMIO_INTERNAL + addr,
+                                     value, size_memop(size) | MO_LE,
+                                     MEMTXATTRS_UNSPECIFIED);
+    }
+}
+
+static const MemoryRegionOps coregraph_mmio_ops = {
+    .read = coregraph_mmio_read,
+    .write = coregraph_mmio_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .impl = {
         .min_access_size = 1,
         .max_access_size = 1,
@@ -611,16 +849,24 @@ static void coregraph_realize(PCIDevice *dev, Error **errp)
     memory_region_add_subregion(get_system_io(), 0xff82,
                                 &s->video_enable_io);
 
-    memory_region_init_alias(&s->linear_alias, owner, "coregraph-linear",
-                             &c->cirrus_linear_io, 0, COREGRAPH_LFB_SIZE);
-    memory_region_init_alias(&s->mmio_alias, owner, "coregraph-mmio",
-                             &c->cirrus_linear_io,
-                             COREGRAPH_LFB_SIZE - 256, 256);
+    memory_region_init_io(&s->linear_alias, owner, &coregraph_linear_ops, s,
+                          "coregraph-linear", COREGRAPH_LFB_SIZE);
+    s->linear_alias.disable_reentrancy_guard = true;
+    memory_region_init_io(&s->mmio_alias, owner, &coregraph_mmio_ops, s,
+                          "coregraph-mmio", 256);
+    s->mmio_alias.disable_reentrancy_guard = true;
     memory_region_init_alias(&s->legacy_alias, owner, "coregraph-legacy",
                              &c->low_mem_container, 0,
                              COREGRAPH_LEGACY_SIZE);
     memory_region_init_alias(&s->isa_alias, owner, "coregraph-isa-window",
                              &c->cirrus_linear_io, 0, 2 * MiB);
+    /*
+     * Keep the aperture itself as a flat alias, but override its hardware
+     * cursor storage.  Otherwise generic Cirrus interprets these bytes as
+     * its in-aperture MMIO register page.
+     */
+    memory_region_init_io(&s->isa_cursor, owner, &coregraph_cursor_ops, s,
+                          "coregraph-isa-cursor", 256);
 
     if (s->primary_vga) {
         c->vga.con = pc98_vga_get_console(s->primary_vga);

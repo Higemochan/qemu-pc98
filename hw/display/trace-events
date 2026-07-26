@@ -231,3 +231,5 @@ apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p fro
 apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
 pc98_coregraph_video_enable(uint8_t on) "video enable %u"
 pc98_coregraph_isa_window(uint64_t base, uint64_t size) "isa window base 0x%" PRIx64 " size 0x%" PRIx64
+pc98_coregraph_solid_brush(uint32_t addr, uint8_t color) "source 0x%08x foreground 0x%02x"
+pc98_coregraph_blt_reset_start(uint8_t old, uint8_t value) "split GR31 0x%02x -> 0x%02x"

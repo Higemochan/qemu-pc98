@@ -71,6 +71,11 @@
 #define PC98_OPNA_ID_PORT       0xa460
 #define PC98_OPNA_SOUND_ID      0x40
 
+/* PC-9801-86 PCM control block (even ports 0xA462-0xA46E). */
+#define PC98_PCM_CLOCK_PORT     0xa466
+#define PC98_PCM_FIFO_PORT      0xa468
+#define PC98_PCM_DACTRL_PORT    0xa46a
+
 /* On-board ADPCM-B DRAM and rhythm ADPCM-A sample ROM. */
 #define PC98_OPNA_ADPCM_RAM     (256 * 1024)
 #define PC98_OPNA_RHYTHM_SIZE   0x2000
@@ -97,7 +102,10 @@ struct Pc98OpnaState {
 
     PortioList portio;          /* FM/SSG ports 0x188-0x18E   */
     PortioList portio_id;       /* sound ID port 0xA460       */
+    PortioList portio_pcm;      /* 86 PCM control/data ports  */
     uint8_t sound_id;           /* 0xA460 read value          */
+    uint8_t pcm_fifo;           /* 0xA468 FIFO control        */
+    uint8_t pcm_dactrl;         /* 0xA46A data format         */
     bool active;
 
     /* Scratch mixing buffers. */
@@ -297,6 +305,70 @@ static const MemoryRegionPortio pc98_opna_id_portio[] = {
     PORTIO_END_OF_LIST(),
 };
 
+/*
+ * The 86 board's PCM clock is observable as bit 0 at 0xA466.  NEC's
+ * Windows 95 NEC73PCM.DRV calibrates the device by waiting for consecutive
+ * low/high transitions here before it initializes the multimedia stack.
+ * Returning an open bus therefore hangs Windows even when no sound is being
+ * played.
+ *
+ * Model the control/status portion of the FIFO for device discovery.  PCM
+ * sample output and FIFO interrupts can be added independently; until then
+ * the FIFO remains empty (bit 6) and writes to its data port are discarded.
+ */
+static const uint32_t pc98_pcm_clock_rate[8] = {
+    352800, 264600, 176400, 132300, 88200, 66150, 44010, 33075,
+};
+
+static uint32_t opna_pcm_read(void *opaque, uint32_t addr)
+{
+    Pc98OpnaState *s = opaque;
+
+    switch (addr) {
+    case PC98_PCM_CLOCK_PORT: {
+        uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        uint32_t rate = pc98_pcm_clock_rate[s->pcm_fifo & 7];
+        uint8_t phase = muldiv64(now, rate * 2,
+                                 NANOSECONDS_PER_SECOND) & 1;
+
+        return 0x40 | phase;     /* FIFO empty plus sample-clock phase */
+    }
+    case PC98_PCM_FIFO_PORT:
+        return s->pcm_fifo & ~0x10;
+    case PC98_PCM_DACTRL_PORT:
+        return s->pcm_dactrl;
+    default:
+        return 0;
+    }
+}
+
+static void opna_pcm_write(void *opaque, uint32_t addr, uint32_t val)
+{
+    Pc98OpnaState *s = opaque;
+
+    switch (addr) {
+    case PC98_PCM_FIFO_PORT:
+        s->pcm_fifo = val;
+        break;
+    case PC98_PCM_DACTRL_PORT:
+        s->pcm_dactrl = val;
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionPortio pc98_opna_pcm_portio[] = {
+    { 0xa462, 1, 1, .read = opna_pcm_read, .write = opna_pcm_write },
+    { 0xa464, 1, 1, .read = opna_pcm_read, .write = opna_pcm_write },
+    { 0xa466, 1, 1, .read = opna_pcm_read, .write = opna_pcm_write },
+    { 0xa468, 1, 1, .read = opna_pcm_read, .write = opna_pcm_write },
+    { 0xa46a, 1, 1, .read = opna_pcm_read, .write = opna_pcm_write },
+    { 0xa46c, 1, 1, .read = opna_pcm_read, .write = opna_pcm_write },
+    { 0xa46e, 1, 1, .read = opna_pcm_read, .write = opna_pcm_write },
+    PORTIO_END_OF_LIST(),
+};
+
 /* ---- Rhythm ADPCM-A ROM: loaded from the -L firmware path ---- */
 
 static void opna_load_rhythm_rom(Pc98OpnaState *s)
@@ -377,6 +449,8 @@ static void pc98_opna_realize(DeviceState *dev, Error **errp)
                              "pc98-opna");
     isa_register_portio_list(isadev, &s->portio_id, 0, pc98_opna_id_portio, s,
                              "pc98-opna-id");
+    isa_register_portio_list(isadev, &s->portio_pcm, 0,
+                             pc98_opna_pcm_portio, s, "pc98-opna-pcm");
 }
 
 static void pc98_opna_reset(DeviceState *dev)
@@ -395,6 +469,8 @@ static void pc98_opna_reset(DeviceState *dev)
     qemu_set_irq(s->irq, 0);
 
     s->sound_id = PC98_OPNA_SOUND_ID;
+    s->pcm_fifo = 0;
+    s->pcm_dactrl = 0x32;
     s->active = false;
     ym2608_reset_chip(s->opna);         /* also resets the SSG via callback */
 }

@@ -4500,7 +4500,17 @@ static bool update_display(void *opaque)
     }
 
     /* resize screen */
-    if (s->width != s->last_width || s->height != s->last_height) {
+    /*
+     * Core-Graph and the native GDC share one QemuConsole.  The Cirrus
+     * renderer can therefore replace its surface without changing the
+     * GDC's cached last_width/last_height.  Check the console itself as
+     * well, so switching back from a 640x480 accelerator mode recreates
+     * the native 640x400 surface instead of leaving stale scanlines below
+     * the GDC image.
+     */
+    if (s->width != s->last_width || s->height != s->last_height ||
+        qemu_console_get_width(s->con, -1) != s->width ||
+        qemu_console_get_height(s->con, -1) != s->height) {
         s->last_width = s->width;
         s->last_height = s->height;
         qemu_console_resize(s->con, s->width, s->height);
