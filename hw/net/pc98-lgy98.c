@@ -74,11 +74,11 @@ struct Pc98Lgy98State {
 };
 
 /*
- * LGY-98 board-ID / "knock" ports at base+0x300.  The real card
- * exposes a serial configuration sequence as well as these fixed ID
- * bytes.  They are sufficient for software to identify the board;
- * writes can be ignored while the built-in board remains fixed at
- * 0x00d0/IRQ6.
+ * LGY-98 board-ID / "knock" ports at base+0x300.  The real card exposes a
+ * serial configuration sequence as well as these fixed ID bytes.  The values
+ * below are returned by the original qemu/9821 LGY-98 model and NP21W.  They
+ * are sufficient for software to identify the board; writes can be ignored
+ * while the built-in board remains fixed at 0x00d0/IRQ6.
  */
 static uint32_t lgy98_board_read(void *opaque, uint32_t addr)
 {

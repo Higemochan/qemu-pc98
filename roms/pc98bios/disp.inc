@@ -1,7 +1,11 @@
 /*
- * Display controller bring-up, replayed from Xa7C9W ITF in
- * its original order: the GDCs take command/parameter streams
- * through the same ports, so only the sequence is meaningful.
+ * Minimal PC-9821 BIOS / Main BIOS Bank
+ * Copyright (C) 2026 Awe Morris
+ *
+ * Display controller bring-up, replayed from the NEC Xa7C9W ITF in
+ * its original order: the GDCs take command/parameter streams through
+ * the same ports, so only the sequence is meaningful.
+ *
  * Format: port, value.
  */
 disp_table:

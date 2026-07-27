@@ -1,18 +1,17 @@
 /*
- * Minimal free PC-9821 BIOS / IDE BIOS
+ * Minimal PC-9821 BIOS / IDE BIOS Bank3
  * Copyright (C) 2026 Awe Morris
  *
- * This is a small implementation of the private disk option-ROM
- * ABI replayed by the Xa7-family main BIOS.  It provides the HDD
- * services needed by the IPL and DOS through INT 1Bh, using PIO.
- * ATAPI and interrupt-driven transfers are intentionally left for a
+ * The private disk option-ROM ABI used by Xa7-family main BIOS.  It provides
+ * the HDD services needed by the IPL and DOS through INT 1Bh, using polled ATA
+ * PIO.  ATAPI and interrupt-driven transfers are intentionally left for a
  * later revision.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-.code16
-.text
+	.code16
+	.text
 
 	.equ	IDE_CHANNEL,	0x0432
 	.equ	IDE_DATA,	0x0640
@@ -31,8 +30,17 @@
 	.equ	PIC2_DATA,	0x000a
 
 	.equ	ATA_SRST,	0x06
-	.equ	ATA_READ,	0x20
-	.equ	ATA_WRITE,	0x30
+	/*
+	 * Xa7's internal IDE BIOS transfers through READ/WRITE MULTIPLE.  The
+	 * drive powers up with a 16-sector multiple block on this controller,
+	 * and the data port remains a plain 16-bit PIO stream, so the existing
+	 * per-sector copy loop also handles the larger DRQ blocks.  Using the
+	 * single-sector commands made NTLDR issue thousands of command cycles
+	 * while loading Windows and turned its dirty-volume check into a
+	 * several-minute apparent hang.
+	 */
+	.equ	ATA_READ,	0xc4
+	.equ	ATA_WRITE,	0xc5
 	.equ	ATA_IDENTIFY,	0xec
 	.equ	ATA_ST_ERR,	0x01
 	.equ	ATA_ST_DRQ,	0x08
@@ -67,8 +75,8 @@
 	.equ	ROM_WORK_SECTORS,	0x3004
 
 	/*
-	 * The main BIOS indexes this table in three-byte slots.  Keep
-	 * even the declined entries and the nonstandard signature
+	 * The main BIOS indexes this table in three-byte slots.  Keep even the
+	 * declined entries and the nonstandard signature byte-for-byte
 	 * compatible with the Xa7C9W ROM.
 	 */
 	.globl	_start

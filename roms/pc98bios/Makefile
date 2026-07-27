@@ -1,4 +1,4 @@
-# Minimal PC-9821 free BIOS ROM banks.
+# Minimal PC-9821 BIOS ROM banks.
 #
 # Each target is one 32 KiB bank image, linked flat and emitted as raw binary
 # the same way pc-bios/optionrom builds its option ROMs.  Drop the results in
@@ -15,6 +15,15 @@ LDFLAGS := -nostdlib -Wl,--build-id=none,-T,$(SRC_DIR)bank.lds,-m,elf_i386,-no-p
 BANKS := pc98itf.bin pc98ide.bin pc98pci.bin pc98bios.bin
 
 all: $(BANKS)
+
+font: pc98font.bin
+
+pc98font.bin: $(SRC_DIR)makefont.py
+	python3 $< $@
+
+qemu-blobs: all font
+	cp pc98itf.bin pc98ide.bin pc98pci.bin pc98bios.bin pc98font.bin \
+		$(SRC_DIR)../../pc-bios/
 
 %.o: $(SRC_DIR)%.S
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
@@ -36,7 +45,8 @@ pc98bios.bin: bios.img
 	$(OBJCOPY) -O binary --pad-to 0x18000 --gap-fill 0xff $< $@
 
 clean:
-	rm -f *.o *.img *.bin
+	rm -f *.o *.img pc98itf.bin pc98ide.bin pc98pci.bin pc98bios.bin
+	rm -f pc98font.bin
 
-.PHONY: all clean
+.PHONY: all font qemu-blobs clean
 .PRECIOUS: %.o %.img

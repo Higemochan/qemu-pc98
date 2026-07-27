@@ -1,11 +1,6 @@
-/*
- * Minimal free PC-9821 BIOS / Interval timer setup
- * Copyright (C) 2026 Awe Morris
- *
- * Replayed from the NEC ITF.  The 8253 takes command/count streams
- * where the same port carries different meanings, so only the
- * sequence is meaningful.
- *
+/* Interval timer setup, replayed from the stock Xa7C9W ITF in its
+ * original order: the 8253 takes command/count streams where the same
+ * port carries different meanings, so only the sequence is meaningful.
  * Format: port, value.
  */
 pit_table:

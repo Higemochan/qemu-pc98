@@ -34,6 +34,7 @@
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/audio/pcspk.h"
 #include "hw/audio/pc98-wss.h"
 #include "hw/audio/pc98-opna.h"
 #include "hw/block/pc98-fdc.h"
@@ -282,6 +283,7 @@ static void pc98_devices_init(Pc98MachineState *pms)
     GSIState *gsi_state;
     ISABus *isa_bus;
     ISADevice *sysdev;
+    ISADevice *pitdev;
     qemu_irq *i8259;
     Pc98VgaRegions vga_regions;
     Pc98MachineClass *pmc = PC98_MACHINE_GET_CLASS(pms);
@@ -305,7 +307,7 @@ static void pc98_devices_init(Pc98MachineState *pms)
         x86_register_ferr_irq(x86ms->gsi[8]);
     }
 
-    pc98_pit_init(isa_bus, x86ms->gsi[0]);
+    pitdev = pc98_pit_init(isa_bus, x86ms->gsi[0]);
 
     pc98_dma_init(isa_bus);
 
@@ -350,6 +352,21 @@ static void pc98_devices_init(Pc98MachineState *pms)
     isa_realize_and_unref(sysdev, isa_bus, &error_fatal);
     qdev_connect_gpio_out(DEVICE(sysdev), 0, x86ms->gsi[15]);
     pms->sys = PC98_SYS(sysdev);
+
+    /* PIT channel 1, gated by active-low system-PPI port-C bit 3. */
+    {
+        ISADevice *speaker = isa_new(TYPE_PC_SPEAKER);
+
+        qdev_prop_set_uint32(DEVICE(speaker), "iobase", 0);
+        qdev_prop_set_uint32(DEVICE(speaker), "pit-frequency", 2457600);
+        qdev_prop_set_uint8(DEVICE(speaker), "pit-channel", 1);
+        object_property_set_link(OBJECT(speaker), "pit", OBJECT(pitdev),
+                                 &error_fatal);
+        isa_realize_and_unref(speaker, isa_bus, &error_fatal);
+        qdev_connect_gpio_out_named(
+            DEVICE(sysdev), "speaker", 0,
+            qdev_get_gpio_in_named(DEVICE(speaker), "gate", 0));
+    }
 
     /* display (vsync IRQ2); must precede pc98_mem_init */
     pms->vga = pc98_vga_init(get_system_io(), x86ms->gsi[2],

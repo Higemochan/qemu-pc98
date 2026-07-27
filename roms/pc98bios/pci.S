@@ -1,17 +1,16 @@
 /*
- * Minimal free PC-9821 BIOS / PCI BIOS
+ * Minimal PC-9821 BIOS / IDE BIOS Bank3
  * Copyright (C) 2026 Awe Morris
  *
- * The main BIOS maps this bank into the D8000 option window and
- * enters +1Bh for INT 1Ah functions AH=B1h/B4h.  The handler below
- * implements the published PCI BIOS calls directly through
- * configuration mechanism #1.
+ * The main BIOS maps this bank into the D8000 option window and enters +1Bh
+ * for INT 1Ah functions AH=B1h/B4h.  The handler below implements the
+ * published PCI BIOS calls directly through configuration mechanism #1.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-.code16
-.text
+	.code16
+	.text
 
 	.equ	PCI_ADDR,	0x0cf8
 	.equ	PCI_DATA,	0x0cfc
@@ -59,7 +58,7 @@ _start:
 	nop
 
 	/*
-	 * +21: private POST helper.  The NEC ROM temporarily uses segment 4000h
+	 * +21: private POST helper.  The Xa7 ROM temporarily uses segment 4000h
 	 * as scratch space here and clears it before returning.  The stock main
 	 * BIOS accepts a declined entry, so no persistent service is needed.
 	 */
@@ -385,7 +384,7 @@ pci_success:
 pci_return:
 	/*
 	 * The PCI BIOS status is returned in AH while AL continues to identify
-	 * the B1xx subfunction.  The stock ROM preserves it even when config
+	 * the B1xx subfunction.  The NEC ROM preserves it even when config
 	 * reads use EAX internally.  B4xx has its own full-AX return values.
 	 */
 	cmpb	$0xb1, -1(%bp)
@@ -426,7 +425,7 @@ cfg_read_dword:
 	ret
 
 /*
- * End a mechanism-1 cycle by clearing the enable bit in CF8h.  The NEC
+ * End a mechanism-1 cycle by clearing the enable bit in CF8h.  The Xa7
  * PCI BIOS does this after every access; leaving it asserted changes how
  * later firmware/OS probes see the configuration latch.
  */

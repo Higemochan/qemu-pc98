@@ -1,10 +1,10 @@
 /*
- * Minial free PC-9821 ITF with KVM support
+ * Minimal PC-9821 BIOS / ITF Bank4
  * Copyright (C) 2026 Awe Morris
  *
  * The bank is paged into the 0xF8000-0xFFFFF window and is the bank selected
  * out of reset, so the CPU's reset vector at 0xFFFF0 lands in this image at
- * offset 0x7FF0.  From there the stock firmware jumps to F800:4000, which is
+ * offset 0x7FF0.  From there the NEC firmware jumps to F800:4000, which is
  * where the ITF proper begins; that entry address is kept because option ROMs
  * and the main BIOS both assume it.
  *
@@ -238,7 +238,7 @@ cold_start:
 	 * body stays blank even with everything else enabled -- only the
 	 * function-key line, which is drawn from a fixed address, shows up.
 	 * The four partitions are start address and length pairs; these are
-	 * the values the stock firmware programs for an 80x25 text screen.
+	 * the values the NEC firmware programs for an 80x25 text screen.
 	 */
 	movb	$GDC_CMD_SCROLL, %al
 	outb	%al, $GDC_TEXT_CMD
@@ -292,7 +292,7 @@ cold_start:
 	 * Paging the BIOS in replaces the memory this code is running from, so
 	 * the bank flip cannot be executed out of the ITF bank: the fetch after
 	 * the OUT would already come from the new bank.  Copy the flip and the
-	 * far jump into low RAM and run them from there.  The stock ITF hands
+	 * far jump into low RAM and run them from there.  The NEC ITF hands
 	 * over the same way, through a stub it plants at 0000:04F8.
 	 */
 	movb	$BANKFLIP_BIOS, %al
@@ -340,7 +340,7 @@ workarea_init:
  * total in AX.  Real mode cannot reach that far, so briefly enter protected
  * mode to give FS a 4 GiB limit and keep using it after dropping back --
  * the segment's cached limit survives, which is what makes the probe
- * possible without the repeated CPU resets the stock firmware uses.
+ * possible without the repeated CPU resets the NEC firmware uses.
  *
  * A20 has to be released first.  While it is masked every odd megabyte
  * aliases onto the even one below it, so the probe would read its own
@@ -364,7 +364,7 @@ sizemem:
 	 * Keep the live descriptor table in ordinary low RAM.  KVM maps the
 	 * banked firmware window for instruction fetches, but descriptor-table
 	 * walks cannot reliably use a table inside that changing ROM alias.
-	 * The stock firmware likewise constructs its protected-mode GDT in RAM.
+	 * The NEC firmware likewise constructs its protected-mode GDT in RAM.
 	 */
 	push	%ds
 	push	%es
@@ -515,9 +515,9 @@ pic_init:
  * In particular it polls the C-bus bridge's register 0x64 and never leaves
  * that loop unless the value below is already in place, which is why a
  * machine whose ITF skipped this stalls with a blank screen right after the
- * PCI enumeration.  The values are the ones the Xa7C9W firmware writes.
- * Several registers are written more than once on purpose, so this is a
- * replayed sequence rather than a set of final values.
+ * PCI enumeration.  The values are the ones the Xa7C9W firmware writes, in
+ * its order -- several registers are written more than once on purpose, so
+ * this is a replayed sequence rather than a set of final values.
  *
  * DS must already address this ROM.
  */
@@ -787,7 +787,7 @@ sdip_init:
 
 
 /*
- * Reproduce the rest of the work area the stock firmware leaves behind.
+ * Reproduce the rest of the work area the NEC firmware leaves behind.
  *
  * Several cells here are results the BIOS consumes rather than settings it
  * recomputes -- notably it decides whether to shadow the D000 segment from
@@ -816,7 +816,7 @@ wa_seed:
 
 	/*
 	 * Text GDC parameter RAM: four (start address, length) partitions,
-	 * as programmed by the stock firmware for the 80x25 text screen.
+	 * as programmed by the NEC firmware for the 80x25 text screen.
 	 */
 gdc_pram:
 	.byte	0x00, 0x00, 0xf0, 0x3f
@@ -852,7 +852,7 @@ sdip_table_end:
 	 * It is deliberately not FD80:0000, the address behind the CPU reset
 	 * vector: that one is the cold-start path which expects to run before
 	 * any firmware has, and re-entering it here restarts the machine.
-	 * Offset 2 is the post-ITF entry, and is where the stock ITF's own
+	 * Offset 2 is the post-ITF entry, and is where the NEC ITF's own
 	 * 0000:04F8 stub jumps.
 	 */
 bankflip_stub:

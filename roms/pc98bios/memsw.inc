@@ -1,11 +1,11 @@
 /*
- * Minimal free PC-9821 BIOS / MEMSW
+ * Minimal PC-9821 BIOS / IDE BIOS Bank3
  * Copyright (C) 2026 Awe Morris
  *
- * Replayed from a real Xa7C9W. Final contents of the
+ * Replayed from the NEC Xa7C9W firmware: final contents of the
  * character-generator cells at code 0x56xx, which is where a PC-98
  * keeps its memory switches.
- *
+ * 
  * Format: code low byte, scan line, value.
  */
 memsw_table:

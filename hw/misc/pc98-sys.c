@@ -52,6 +52,7 @@ enum {
 /* Calendar-clock command codes (low three bits of the command latch). */
 enum {
     CAL_CMD_SHIFT    = 0x01,
+    CAL_CMD_TIMESET  = 0x02,
     CAL_CMD_TIMEREAD = 0x03,
     CAL_CMD_EXTEND   = 0x07,
 };
@@ -72,7 +73,10 @@ struct Pc98SysState {
     uint8_t  cal_port;
     uint8_t  cal_cmd;
     uint64_t cal_out;
+    uint64_t cal_shift;
+    uint8_t  cal_shift_count;
     uint8_t  cal_cmd_shift;
+    int64_t  rtc_offset;
     uint8_t  tick_mode;
     uint8_t  tick_count;
     uint8_t  hrtime_count;
@@ -100,6 +104,7 @@ struct Pc98SysState {
     PortioList portio_list;
     QEMUTimer *tick_timer;
     qemu_irq irq;
+    qemu_irq speaker;
     int64_t timestamp_origin;
 };
 
@@ -117,7 +122,7 @@ static void pc98_sys_hrtime_init(Pc98SysState *s)
     uint32_t ticks;
     int64_t ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
-    qemu_get_timedate(&now, 0);
+    qemu_get_timedate(&now, s->rtc_offset);
     ticks = ((now.tm_hour * 60 + now.tm_min) * 60 + now.tm_sec) * 32;
     ticks += (ns % NANOSECONDS_PER_SECOND) * 32 / NANOSECONDS_PER_SECOND;
 
@@ -179,7 +184,7 @@ static void cal_latch_time(Pc98SysState *s)
 {
     struct tm now;
 
-    qemu_get_timedate(&now, 0);
+    qemu_get_timedate(&now, s->rtc_offset);
     s->cal_out  = (uint64_t)to_bcd(now.tm_sec);
     s->cal_out |= (uint64_t)to_bcd(now.tm_min)  << 8;
     s->cal_out |= (uint64_t)to_bcd(now.tm_hour) << 16;
@@ -192,6 +197,32 @@ static void cal_latch_time(Pc98SysState *s)
     }
 }
 
+static void cal_set_time(Pc98SysState *s)
+{
+    struct tm now;
+    uint64_t value = s->cal_shift;
+    int year;
+
+    if (s->cal_shift_count < 48) {
+        return;
+    }
+
+    qemu_get_timedate(&now, s->rtc_offset);
+    now.tm_sec = from_bcd(value & 0xff);
+    now.tm_min = from_bcd((value >> 8) & 0xff);
+    now.tm_hour = from_bcd((value >> 16) & 0xff);
+    now.tm_mday = from_bcd((value >> 24) & 0xff);
+    now.tm_mon = ((value >> 36) & 0x0f) - 1;
+    year = from_bcd((value >> 40) & 0xff);
+    now.tm_year = year + (year < 80 ? 100 : 0);
+    now.tm_isdst = -1;
+    s->rtc_offset = qemu_timedate_diff(&now);
+
+    /* Keep the high-resolution work-area clock consistent with the RTC. */
+    s->hrtime_initialized = false;
+    pc98_sys_hrtime_init(s);
+}
+
 static void cal_serial_write(void *opaque, uint32_t addr, uint32_t value)
 {
     Pc98SysState *s = opaque;
@@ -201,6 +232,11 @@ static void cal_serial_write(void *opaque, uint32_t addr, uint32_t value)
         s->cal_cmd = s->cal_port & 0x07;
         if (s->cal_cmd == CAL_CMD_TIMEREAD) {
             cal_latch_time(s);
+        } else if (s->cal_cmd == CAL_CMD_SHIFT) {
+            s->cal_shift = 0;
+            s->cal_shift_count = 0;
+        } else if (s->cal_cmd == CAL_CMD_TIMESET) {
+            cal_set_time(s);
         } else if (s->cal_cmd == CAL_CMD_EXTEND) {
             /* extended form: the real opcode arrived over the serial line */
             s->cal_cmd = s->cal_cmd_shift & 0x0f;
@@ -212,7 +248,13 @@ static void cal_serial_write(void *opaque, uint32_t addr, uint32_t value)
     /* Each falling clock edge shifts one bit in and one bit out. */
     if ((s->cal_port & CAL_CLK) && !(value & CAL_CLK)) {
         uint8_t data_in = (s->cal_port & CAL_DATA) != 0;
-        s->cal_cmd_shift = (s->cal_cmd_shift | (data_in << 4)) >> 1;
+
+        if (s->cal_cmd == CAL_CMD_SHIFT && s->cal_shift_count < 64) {
+            s->cal_shift |= (uint64_t)data_in << s->cal_shift_count;
+            s->cal_shift_count++;
+        } else {
+            s->cal_cmd_shift = (s->cal_cmd_shift | (data_in << 4)) >> 1;
+        }
         s->cal_out >>= 1;
     }
     s->cal_port = value;
@@ -291,7 +333,8 @@ static void pc98_sysppi_c_write(void *opaque, uint32_t addr, uint32_t value)
     Pc98SysState *s = opaque;
 
     s->sys_c = value;
-    /* TODO: bit 3 gates the PC speaker output. */
+    /* PC-98 uses active-low port-C bit 3 for the PIT channel-1 speaker. */
+    qemu_set_irq(s->speaker, !(value & 0x08));
 }
 
 static uint32_t pc98_sysppi_c_read(void *opaque, uint32_t addr)
@@ -520,6 +563,7 @@ static void pc98_sys_realize(DeviceState *dev, Error **errp)
                              pc98_sys_portio, s, "pc98-sys");
 
     qdev_init_gpio_out(dev, &s->irq, 1);
+    qdev_init_gpio_out_named(dev, &s->speaker, "speaker", 1);
 
     s->tick_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, pc98_sys_tick, s);
     timer_mod(s->tick_timer,

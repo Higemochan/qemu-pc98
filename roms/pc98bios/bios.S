@@ -1,5 +1,5 @@
 /*
- * Minimal free PC-9821 BIOS / Main BIOS
+ * Minimal PC-9821 BIOS / Main BIOS Bank
  * Copyright (C) 2026 Awe Morris
  *
  * The combined image occupies banks 5-7 (E8000h-FFFFFh).  The ITF enters
@@ -69,6 +69,8 @@
 	.equ	CRT_GRAPH_MODE,	0x054c
 	.equ	BOOT_DEVICE,	0x0584
 	.equ	TIMER_COUNT,	0x058a
+	.equ	BEEP_COUNT,	0x058c
+	.equ	TIMER_ACTIVE,	0x058e
 	.equ	SYSTEM_FLAGS,	0x0500
 
 	.macro	set_vector number, handler
@@ -81,10 +83,11 @@
 	 *
 	 * Later NEC operating systems use this fixed table in addition to the
 	 * ordinary BIOS work area when selecting their machine-specific IOS
-	 * path.  byte 04h advertises PCI and other platform facilities,
-	 * byte 10h is the IDE-device bitmap, byte 11h carries serial/CD-ROM
-	 * capability flags, and byte 3fh is the PC-9821 model number.
-	 * The common 98h,21h header identifies the table as a PC-9821 descriptor.
+	 * path.  NP21/W documents the relevant fields: byte 04h advertises
+	 * PCI and other platform facilities, byte 10h is the IDE-device bitmap,
+	 * byte 11h carries serial/CD-ROM capability flags, and byte 3fh is the
+	 * PC-9821 model number.  The common 98h,21h header identifies the table
+	 * as a PC-9821 descriptor.
 	 *
 	 * The values describe the Xa7-compatible machine implemented by
 	 * -M pc9821.  Byte 10h is zero in ROM and is exposed through the
@@ -124,8 +127,8 @@ cold_start:
 
 	/*
 	 * Undo the temporary flat-segment and A20 state used by the free ITF's
-	 * extended-memory probe.  The BIOS enters the IPL with A20 masked,
-	 * ordinary 64-KiB real-mode segment limits and CR0=00000032h.
+	 * extended-memory probe.  The NEC Xa7 BIOS enters the IPL with A20
+	 * masked, ordinary 64-KiB real-mode segment limits and CR0=00000032h.
 	 * DOS uses the 1-MiB wraparound while detecting the processor and its
 	 * initial memory layout, so leaking the probe state breaks kernel
 	 * initialisation even though all disk reads themselves are correct.
@@ -163,20 +166,46 @@ cold_start:
 	/*
 	 * BIOS_FLAG3 bit 6 advertises the extended PC-9821 keyboard command
 	 * set; bit 1 is the companion Xa-class system capability flag.  The
-	 * BIOS exposes 42h, which is also the value expected by the PC-98
-	 * platform classification in Windows NT.
+	 * NEC Xa7 BIOS exposes 42h, which is also the value expected by the
+	 * PC-98 platform classification in Windows NT.
 	 */
 	orb	$0x42, 0x0481
+	movb	$0x96, 0x0485		/* FDC interrupt-completion countdown */
 	movb	$0x84, 0x053c
+	/*
+	 * Size of the writable native graphics raster in the BIOS work area.
+	 * Xa-class firmware publishes 1900h (640 x 400 at 16 pixels per word).
+	 * NEC's NT display hand-off uses this value when erasing the GDC boot
+	 * surface; zero leaves the final "Windows is starting" frame visible
+	 * even though the kernel and Core-Graph driver have already started.
+	 */
+	movw	$0x1900, 0x054a
 	movw	$0x704f, 0x054c
+	/*
+	 * BIOS_FLAG0 bit 1 advertises the 1-MiB floppy interface (the native
+	 * PC-98 1.2-MiB format).  The controller exists even when no medium is
+	 * inserted.  NEC Xa7 firmware therefore publishes 03h here; leaving
+	 * the bit clear makes NTDETECT classify the FDC inconsistently with
+	 * the hardware it subsequently probes.
+	 */
+	orb	$0x02, SYSTEM_FLAGS
 	movb	$0x01, 0x055c
 	movb	$0xff, 0x0493
 	movw	$0x0258, 0x0598
+	movb	$0xfe, 0x05a4		/* no pending FDC recalibrate result */
 	movb	$0x77, 0x05ae
 	movb	$0xff, 0x05ca
-	movb	$0x07, 0x05b0
+	movb	$0x96, 0x05cb
 	/*
-	 * POST sets the expansion-equipment summary after probing the
+	 * Xa-class NT compatibility value.  The NEC IDE BIOS publishes the
+	 * precise drive map in 0457h/05BAh/F8E90h; 05B0h must remain FFh when
+	 * the second device on each channel is absent.  NP21/W carries the
+	 * same workaround for the NT IDE driver, which otherwise falls back to
+	 * its legacy single-sector path.
+	 */
+	movb	$0xff, 0x05b0
+	/*
+	 * Xa7 POST sets the expansion-equipment summary after probing the
 	 * integrated devices.  Bit 7 is present on this fixed pc9821 profile.
 	 * Keep the stock value here even though legacy PC-9801-86 software
 	 * normally probes the sound board directly through 0A460h/0188h.
@@ -208,6 +237,32 @@ cold_start:
 	movb	$0x7d, %al
 	outb	%al, $PIC1_DATA
 	sti
+
+	/*
+	 * Give the free firmware a visible POST hand-off like the original
+	 * PC-9821 firmware.  The ITF has already sized memory; do not touch the
+	 * contents again here, merely report the installed amount and hold the
+	 * message for one second.  INT 1Ch/AH=06h supplies both the short
+	 * power-on tone and an interrupt-driven delay, so this does not depend
+	 * on the host CPU's execution speed.
+	 */
+	call	post_memory_message
+	movw	$10, %cx		/* 100-ms power-on tone */
+	movw	$880, %dx
+	movb	$0x06, %ah
+	int	$0x1c
+	pushw	%cs
+	popw	%es
+	movw	$(post_delay_done - FD80_FILE_BASE), %bx
+	movw	$100, %cx		/* 100 x 10 ms = one second */
+	movb	$0x02, %ah
+	int	$0x1c
+1:
+	cmpb	$0, TIMER_ACTIVE
+	je	2f
+	hlt
+	jmp	1b
+2:
 
 	/*
 	 * Prefer an inserted floppy, as the original firmware does.  fdd_boot
@@ -320,13 +375,19 @@ crt_init:
 	 * device resets these registers to zero, so omitting this makes all
 	 * four GDC planes render as black even after AH=40h starts graphics.
 	 */
-	movb	$0x04, %al
+	/*
+	 * Each register describes two of the eight colours.  A8h owns white
+	 * and magenta, while AEh owns green and black; the previous values for
+	 * those two registers were reversed and consequently mapped colour 0
+	 * (the normal text background) to magenta.
+	 */
+	movb	$0x37, %al
 	outb	%al, $GDC_PALETTE_0
 	movb	$0x15, %al
 	outb	%al, $GDC_PALETTE_1
 	movb	$0x26, %al
 	outb	%al, $GDC_PALETTE_2
-	movb	$0x37, %al
+	movb	$0x04, %al
 	outb	%al, $GDC_PALETTE_3
 	movb	$0x0f, CRT_RASTER	/* 400-line, 25-row text */
 	movb	$0x84, CRT_MODE
@@ -343,6 +404,80 @@ crt_init:
 	ret
 
 /*
+ * Draw "Memory N MB  OK" in the centre of the power-on text screen.
+ * PC-98 text VRAM stores a 16-bit character cell at A000:row*160 and an
+ * attribute byte for that cell 2000h bytes later.  WA_EXTMEM (0594h) is the
+ * number of whole megabytes above the reserved 16-MiB boundary.
+ */
+post_memory_message:
+	pushw	%ax
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+	pushw	%si
+	pushw	%di
+	pushw	%es
+
+	movw	$0xa000, %ax
+	movw	%ax, %es
+	movw	$(10 * 160 + 24 * 2), %di
+	movw	$(post_memory_prefix - FD80_FILE_BASE), %si
+	call	post_puts
+
+	movw	0x0594, %ax
+	addw	$16, %ax
+	xorw	%cx, %cx
+	movw	$10, %bx
+1:
+	xorw	%dx, %dx
+	divw	%bx
+	pushw	%dx
+	incw	%cx
+	testw	%ax, %ax
+	jnz	1b
+2:
+	popw	%ax
+	addb	$'0', %al
+	call	post_putc
+	loop	2b
+
+	movw	$(post_memory_suffix - FD80_FILE_BASE), %si
+	call	post_puts
+	popw	%es
+	popw	%di
+	popw	%si
+	popw	%dx
+	popw	%cx
+	popw	%bx
+	popw	%ax
+	ret
+
+post_puts:
+	movb	%cs:(%si), %al
+	incw	%si
+	testb	%al, %al
+	jz	1f
+	call	post_putc
+	jmp	post_puts
+1:
+	ret
+
+post_putc:
+	xorb	%ah, %ah
+	movw	%ax, %es:(%di)
+	movb	$0xe1, %es:0x2000(%di)
+	addw	$2, %di
+	ret
+
+post_memory_prefix:
+	.asciz	"Memory "
+post_memory_suffix:
+	.asciz	" MB  OK"
+
+post_delay_done:
+	iret
+
+/*
  * Match the Xa7C9W power-on WSS state.  The firmware selects IRQ3 but
  * deliberately leaves the DMA field invalid; a non-PnP DOS driver can then
  * retain IRQ3 and choose DMA1 by changing 08h to 0Ah.  The latch remains
@@ -350,7 +485,7 @@ crt_init:
  *
  * Initialising only that latch is insufficient.  The NEC POST also puts
  * the CS4231 into mode 2, disables playback/capture, and establishes its
- * mixer/format defaults.  A client probes those indirect registers before
+ * mixer/format defaults.  Suika3 probes those indirect registers before
  * choosing its fallback DMA channel; against the bare device-reset state it
  * repeatedly writes the playback format without PMCE and stops in sound
  * initialisation before reaching the display driver.
@@ -491,8 +626,39 @@ timer_irq:
 	pushw	%ds
 	xorw	%ax, %ax
 	movw	%ax, %ds
+
+	cmpw	$0, BEEP_COUNT
+	je	1f
+	decw	BEEP_COUNT
+	jne	1f
+	movb	$0x07, %al		/* system-PPI port C bit 3 set: off */
+	outb	%al, $0x37
+1:
+	cmpb	$0, TIMER_ACTIVE
+	je	timer_no_single
 	decw	TIMER_COUNT
 	je	timer_expired
+timer_no_single:
+	cmpb	$0, TIMER_ACTIVE
+	jne	timer_continue
+	cmpw	$0, BEEP_COUNT
+	jne	timer_continue
+
+	/* No timer source remains: mask IRQ0 and do not re-arm the PIT. */
+	inb	$PIC1_DATA, %al
+	orb	$0x01, %al
+	outb	%al, $0x5f
+	outb	%al, $PIC1_DATA
+	popw	%ds
+	cli
+	movb	$0x20, %al
+	outb	%al, $PIC1_CMD
+	outb	%al, $0x5f
+	sti
+	popw	%ax
+	iret
+
+timer_continue:
 	popw	%ds
 	cli
 	movb	$0x20, %al
@@ -508,14 +674,18 @@ timer_expired:
 	/*
 	 * The low-resolution single-event service installs its callback as
 	 * INT 07h.  Mask the completed one-shot before invoking it, exactly as
-	 * NEC FD80 BIOS does.  Leave the interrupted general registers
+	 * the NEC FD80 BIOS does.  Leave the interrupted general registers
 	 * live: DOS's Windows loader deliberately returns DX=1 from this
 	 * callback to terminate its keyboard-sense wait loop.
 	 */
+	movb	$0, TIMER_ACTIVE
+	cmpw	$0, BEEP_COUNT
+	jne	1f
 	inb	$PIC1_DATA, %al
 	orb	$0x01, %al
 	outb	%al, $0x5f
 	outb	%al, $PIC1_DATA
+1:
 	movb	$0x20, %al
 	outb	%al, $PIC1_CMD
 	outb	%al, $0x5f
@@ -758,7 +928,16 @@ int18_buffer_reset:
 	jmp	int18_return
 
 int18_mode_set:
-	movb	%al, CRT_MODE
+	/*
+	 * Bit 7 is the Xa-class 31-kHz capability latch, not part of the mode
+	 * value supplied by callers.  NEC Windows writes AL=00h while taking
+	 * ownership of the display; replacing the whole byte makes NTDETECT
+	 * later see a pre-Xa CRT.  NEC firmware preserves the bit (84h
+	 * becomes 80h).
+	 */
+	andb	$0x7f, %al
+	andb	$0x80, CRT_MODE
+	orb	%al, CRT_MODE
 	jmp	int18_return
 
 int18_mode_get:
@@ -920,7 +1099,7 @@ int18_graph_area:
 	 * ALL screen changes the slave GDC clock, SYNC stream and pitch.  The
 	 * NEC BIOS also records that transition in PRXDUPD (054Dh).  Merely
 	 * changing SCROLL leaves the GDC on the old 40-word pitch and produces
-	 * a black screen in a client after its display-selection prompt.
+	 * a black screen in YU-NO after its display-selection prompt.
 	 */
 	movb	%ch, %al
 	andb	$0xc0, %al
@@ -1633,10 +1812,14 @@ fdd_boot_failed:
 int1c:
 	cmpb	$0x00, %ah
 	je	int1c_read_calendar
+	cmpb	$0x01, %ah
+	je	int1c_write_calendar
 	cmpb	$0x02, %ah
 	je	int1c_set_single_timer
 	cmpb	$0x03, %ah
 	je	int1c_continue_timer
+	cmpb	$0x06, %ah
+	je	int1c_beep
 	cmpb	$0x80, %ah
 	je	int1c_read_hrtimer
 	cmpb	$0x81, %ah
@@ -1682,6 +1865,56 @@ int1c_read_calendar:
 	popw	%ax
 	iret
 
+int1c_write_calendar:
+	/*
+	 * Shift the public six-byte buffer into the uPD4990A, least-significant
+	 * bit first in the hardware order second..year, then issue TIMESET.
+	 * The month/weekday byte is passed through unchanged.
+	 */
+	pushw	%ax
+	pushw	%cx
+	pushw	%dx
+	pushw	%si
+	movw	%bx, %si
+	addw	$5, %si
+
+	movb	$0x09, %al		/* SHIFT command | STB */
+	outb	%al, $CALENDAR_CMD
+	movb	$0x01, %al		/* capture SHIFT, reset serial input */
+	outb	%al, $CALENDAR_CMD
+
+	movw	$6, %cx
+1:
+	pushw	%cx
+	movb	%es:(%si), %ah
+	movw	$8, %cx
+2:
+	movb	$0x01, %al
+	testb	$0x01, %ah
+	jz	3f
+	orb	$0x20, %al		/* DATA */
+3:
+	orb	$0x10, %al		/* rising CLK */
+	outb	%al, $CALENDAR_CMD
+	andb	$0xef, %al		/* falling CLK shifts the bit */
+	outb	%al, $CALENDAR_CMD
+	shrb	$1, %ah
+	loop	2b
+	decw	%si
+	popw	%cx
+	loop	1b
+
+	movb	$0x0a, %al		/* TIMESET command | STB */
+	outb	%al, $CALENDAR_CMD
+	movb	$0x02, %al
+	outb	%al, $CALENDAR_CMD
+
+	popw	%si
+	popw	%dx
+	popw	%cx
+	popw	%ax
+	iret
+
 int1c_set_single_timer:
 	/*
 	 * CX is a count of 10-ms ticks (zero denotes 65536); ES:BX is an IRET
@@ -1694,6 +1927,7 @@ int1c_set_single_timer:
 	xorw	%dx, %dx
 	movw	%dx, %ds
 	movw	%cx, TIMER_COUNT
+	movb	$1, TIMER_ACTIVE
 	movw	%bx, (4 * 0x07)
 	movw	%es, (4 * 0x07 + 2)
 	movb	$0x36, %al		/* channel 0, LSB/MSB, mode 3 */
@@ -1711,6 +1945,58 @@ int1c_continue_timer:
 	 * this Xa7-compatible low-resolution path uses it only from IRQ0.
 	 */
 	call	timer_program_10ms
+	iret
+
+int1c_beep:
+	/*
+	 * CX is the duration in 10-ms ticks and DX is the requested frequency
+	 * in hertz.  PIT channel 1 runs from 2.4576 MHz; active-low system-PPI
+	 * port-C bit 3 connects it to the speaker.
+	 */
+	pushw	%ax
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+	pushw	%si
+	pushw	%ds
+	movw	%cx, %si
+	movzwl	%dx, %ecx
+	testl	%ecx, %ecx
+	jnz	1f
+	movl	$32, %ecx
+1:
+	movl	$2457600, %eax
+	xorl	%edx, %edx
+	divl	%ecx
+	testl	%eax, %eax
+	jnz	2f
+	incl	%eax
+2:
+	cmpl	$0xffff, %eax
+	jbe	3f
+	movl	$0xffff, %eax
+3:
+	movw	%ax, %bx
+	movb	$0x76, %al		/* channel 1, LSB/MSB, mode 3 */
+	outb	%al, $PIT_CONTROL
+	movw	%bx, %ax
+	outb	%al, $0x73
+	movb	%ah, %al
+	outb	%al, $0x73
+
+	xorw	%ax, %ax
+	movw	%ax, %ds
+	movw	%si, BEEP_COUNT
+	movb	$0x06, %al		/* port C bit 3 reset: speaker on */
+	outb	%al, $0x37
+	call	timer_program_10ms
+
+	popw	%ds
+	popw	%si
+	popw	%dx
+	popw	%cx
+	popw	%bx
+	popw	%ax
 	iret
 
 /*

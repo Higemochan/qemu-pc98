@@ -4808,6 +4808,7 @@ static void pc98_vga_reset(void *opaque)
 static void gdc_chr_param_write(void *opaque, uint32_t addr, uint32_t value)
 {
     VGAState *s = opaque;
+    trace_pc98_gdc_write(0x60, value);
     gdc_param_write(&s->gdc_chr, addr, value);
 }
 
@@ -4820,6 +4821,7 @@ static uint32_t gdc_chr_statreg_read(void *opaque, uint32_t addr)
 static void gdc_chr_cmdreg_write(void *opaque, uint32_t addr, uint32_t value)
 {
     VGAState *s = opaque;
+    trace_pc98_gdc_write(0x62, value);
     gdc_cmdreg_write(&s->gdc_chr, addr, value);
 }
 
@@ -4832,6 +4834,7 @@ static uint32_t gdc_chr_data_read(void *opaque, uint32_t addr)
 static void gdc_gfx_param_write(void *opaque, uint32_t addr, uint32_t value)
 {
     VGAState *s = opaque;
+    trace_pc98_gdc_write(0xa0, value);
     gdc_param_write(&s->gdc_gfx, addr, value);
 }
 
@@ -4844,6 +4847,7 @@ static uint32_t gdc_gfx_statreg_read(void *opaque, uint32_t addr)
 static void gdc_gfx_cmdreg_write(void *opaque, uint32_t addr, uint32_t value)
 {
     VGAState *s = opaque;
+    trace_pc98_gdc_write(0xa2, value);
     gdc_cmdreg_write(&s->gdc_gfx, addr, value);
 }
 

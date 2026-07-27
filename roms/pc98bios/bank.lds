@@ -1,5 +1,5 @@
 /*
- * Link script for Minial PC-9821 free BIOS.
+ * Link script for Minimal PC-9821 BIOS.
  *
  * Each bank is 32 KiB and is paged into the 0xF8000 window, so the bank's
  * own offsets are what the code sees at 0xF8000 + offset.  Everything is
