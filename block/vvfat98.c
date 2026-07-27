@@ -8,7 +8,7 @@
  *   - LBA 1            : PC-98 partition table (32-byte entries, CHS in the
  *                        BIOS's fixed 8-head / 17-sector geometry)
  *   - cylinder 1 (LBA 136): the FAT partition boot sector (BPB) and data
- * Reachable as  -drive file=fat98:rw:<dir>,format=raw,if=ide98  on -M pc98.
+ * Reachable as  -drive file=fat98:rw:<dir>,format=raw,if=ide  on -M pc98.
  * Kept as a separate driver so the shared vvfat.c stays untouched.
  *
  * Based on block/vvfat.c:

@@ -34,6 +34,8 @@
 	.equ	GDC_PALETTE_1,	0x00aa
 	.equ	GDC_PALETTE_2,	0x00ac
 	.equ	GDC_PALETTE_3,	0x00ae
+	.equ	PCI_CONF_ADDR,	0x0cf8
+	.equ	PCI_CONF_DATA,	0x0cfc
 	.equ	PCI_ROM_SELECT,	0x063c
 	.equ	CALENDAR_CMD,	0x0020
 	.equ	CALENDAR_MODE,	0x0022
@@ -248,9 +250,7 @@ cold_start:
 	 * fills the four-byte disk dispatch template at 04D8h.  DOS and IOS use
 	 * those work-area cells when classifying the fixed-disk BIOS.
 	 */
-	movw	$PCI_ROM_SELECT, %dx
-	xorb	%al, %al
-	outb	%al, %dx
+	call	select_ide_rom
 	movw	$0x04d8, %bx
 	lcall	$0xd800, $0x000c
 	lcall	$0xd800, $0x000f
@@ -304,6 +304,30 @@ boot_failed:
 	cli
 	hlt
 	jmp	boot_failed
+
+/*
+ * Select the internal IDE option ROM in the D8000 window.
+ *
+ * PCI PC-9821 maps the base option ROM with selector 0, while pre-PCI
+ * PC-9801 uses selector 1.  Configuration mechanism #1 returns all ones
+ * when the PCI host bridge is absent, allowing one BIOS image to choose
+ * the correct value at runtime.
+ */
+select_ide_rom:
+	pushl	%eax
+	pushw	%dx
+	movl	$0x80000000, %eax
+	movw	$PCI_CONF_ADDR, %dx
+	outl	%eax, %dx
+	movw	$PCI_CONF_DATA, %dx
+	inl	%dx, %eax
+	cmpl	$0xffffffff, %eax
+	sete	%al
+	movw	$PCI_ROM_SELECT, %dx
+	outb	%al, %dx
+	popw	%dx
+	popl	%eax
+	ret
 
 install_vectors:
 	pushw	%ax
@@ -804,6 +828,26 @@ keyboard_buffer_make:
 	movzbl	%ah, %ebx
 	movb	%cs:(ascii_table - FD80_FILE_BASE)(%bx), %al
 1:
+	/*
+	 * The direct key-state byte uses bit 4 for CTRL (scan code 74h).
+	 * DOS consumes the ASCII byte from this BIOS queue, rather than
+	 * reconstructing it from the raw scan code, so translate the ordinary
+	 * alphabetic and @.._ combinations to their C0 control characters.
+	 */
+	testb	$0x10, KB_SHIFT
+	jz	2f
+	cmpb	$'a', %al
+	jb	1f
+	cmpb	$'z', %al
+	jbe	keyboard_control_ascii
+1:
+	cmpb	$'@', %al
+	jb	2f
+	cmpb	$'_', %al
+	ja	2f
+keyboard_control_ascii:
+	andb	$0x1f, %al
+2:
 	movw	KB_TAIL, %bx
 	movw	%ax, (%bx)
 	addw	$2, %bx
@@ -1483,6 +1527,32 @@ int1a_legacy_entry:
 	iret
 
 int1a_pci:
+	/*
+	 * The same free BIOS also runs on non-PCI pc9801.  Report the PCI
+	 * function as unsupported there instead of banking the IDE ROM into
+	 * D8000 and jumping into its unrelated dispatch table.
+	 */
+	pushw	%bp
+	movw	%sp, %bp
+	pushw	%ax
+	pushw	%dx
+	movl	$0x80000000, %eax
+	movw	$PCI_CONF_ADDR, %dx
+	outl	%eax, %dx
+	movw	$PCI_CONF_DATA, %dx
+	inl	%dx, %eax
+	cmpl	$0xffffffff, %eax
+	jne	1f
+	popw	%dx
+	popw	%ax
+	movb	$0x81, %ah
+	orw	$0x0001, 6(%bp)
+	popw	%bp
+	iret
+1:
+	popw	%dx
+	popw	%ax
+	popw	%bp
 	pushw	%ax
 	pushw	%dx
 	movw	$PCI_ROM_SELECT, %dx
@@ -1544,9 +1614,7 @@ int1b:
 	movw	%bx, %ds
 	movw	$0x0018, 0x04ac
 	movw	$0xd800, 0x04ae
-	movw	$PCI_ROM_SELECT, %dx
-	xorb	%al, %al
-	outb	%al, %dx
+	call	select_ide_rom
 	ljmp	$0xd800, $0x0018
 1:
 	popw	%ax
@@ -2215,8 +2283,9 @@ int1c_write_hrtimer:
  * the NEC BIOS acknowledges them by returning with carry clear.
  *
  * AH=9Ah is the PC-98 form of the APM BIOS interface.  Its AL function
- * numbers and register contract match the standard AX=53xx interface.  Xa
- * firmware reports APM 1.1 or later through AX=9A00h; Windows 9x uses that
+ * numbers and register contract match the standard AX=53xx interface.  The
+ * Xa7 firmware reports AX=0111h through AX=9A00h; the NEC Windows 9x
+ * VPOWERD loader expects that PC-98 version encoding.  Windows 9x uses this
  * service to power the machine off, and Windows NT can use it through the
  * NT APM/Legacy Support driver.
  */
@@ -2279,7 +2348,7 @@ int1f_apm:
 	jmp	int1f_apm_error
 
 int1f_apm_installation:
-	movw	$0x0112, %ax		/* APM BIOS version 1.12 */
+	movw	$0x0111, %ax		/* Xa7-compatible PC-98 APM version */
 	movw	$0x504d, %bx		/* "PM" installation signature */
 	xorw	%cx, %cx		/* no 16/32-bit protected-mode entry */
 	jmp	int1f_apm_success
@@ -2346,7 +2415,7 @@ int1f_apm_get_state:
 	jmp	int1f_apm_success
 
 int1f_apm_driver_version:
-	movw	$0x0112, %ax
+	movw	$0x0111, %ax
 	jmp	int1f_apm_success
 
 int1f_apm_capabilities:
@@ -2552,11 +2621,38 @@ pnp_bios_entry:
 	pushw	%ds
 	pushw	%es
 
-	movw	6(%bp), %ax		/* Function */
+	/*
+	 * Calls from real mode and a 16-bit protected-mode stack can address
+	 * the argument frame through BP.  Windows 9x may instead use a 32-bit
+	 * stack while calling this 16-bit entry point.  Preserve the complete
+	 * stack offset in EDX in that case; truncating it to BP makes the BIOS
+	 * fetch arguments from an unrelated location below 64 KiB.
+	 *
+	 * EDX is also useful for the 16-bit cases after zero extension, so all
+	 * argument references below use an explicit SS:EDX address.  Unlike DI,
+	 * it remains intact while Function 01h copies the node through ES:DI.
+	 */
+	movzwl	%bp, %edx
+	movl	%cr0, %eax
+	testb	$0x01, %al
+	jz	1f
+	movw	%ss, %ax
+	larl	%ax, %eax
+	jnz	1f
+	testl	$0x00400000, %eax	/* stack descriptor B (32-bit) bit */
+	jz	1f
+	movl	%esp, %edx
+	addl	$16, %edx		/* saved FLAGS, BX..ES after saved BP */
+1:
+	movw	%ss:6(%edx), %ax	/* Function */
 	testw	%ax, %ax
 	jz	pnp_get_num_nodes
 	cmpw	$0x0001, %ax
 	je	pnp_get_device_node
+	cmpw	$0x0002, %ax
+	je	pnp_set_device_node
+	cmpw	$0x000b, %ax
+	je	pnp_get_apm_id_table
 	movw	$0x0082, %ax		/* FUNCTION_NOT_SUPPORTED */
 	jmp	pnp_return
 
@@ -2565,9 +2661,9 @@ pnp_get_num_nodes:
 	 * Function 00h:
 	 *   far *NumNodes at +08h, far *NodeSize at +0Ch.
 	 */
-	ldsw	8(%bp), %bx
+	ldsw	%ss:8(%edx), %bx
 	movb	$1, (%bx)
-	ldsw	12(%bp), %bx
+	ldsw	%ss:12(%edx), %bx
 	movw	$(pnp_apm_node_end - pnp_apm_node), (%bx)
 	xorw	%ax, %ax		/* SUCCESS */
 	jmp	pnp_return
@@ -2578,7 +2674,7 @@ pnp_get_device_node:
 	 *   far *Node at +08h, far *buffer at +0Ch, Control at +10h.
 	 * Only current (1) or next-boot (2) configuration is valid.
 	 */
-	movw	16(%bp), %ax
+	movw	%ss:16(%edx), %ax
 	cmpw	$0x0001, %ax
 	je	1f
 	cmpw	$0x0002, %ax
@@ -2586,13 +2682,13 @@ pnp_get_device_node:
 	movw	$0x0084, %ax		/* BAD_PARAMETER */
 	jmp	pnp_return
 1:
-	ldsw	8(%bp), %bx
+	ldsw	%ss:8(%edx), %bx
 	cmpb	$0, (%bx)
 	je	2f
 	movw	$0x0083, %ax		/* INVALID_HANDLE */
 	jmp	pnp_return
 2:
-	lesw	12(%bp), %di
+	lesw	%ss:12(%edx), %di
 	pushw	%cs
 	popw	%ds
 	movw	$(pnp_apm_node - FD80_FILE_BASE), %si
@@ -2601,8 +2697,45 @@ pnp_get_device_node:
 	rep	movsb
 
 	/* Tell the caller that this was the final node. */
-	ldsw	8(%bp), %bx
+	ldsw	%ss:8(%edx), %bx
 	movb	$0xff, (%bx)
+	xorw	%ax, %ax		/* SUCCESS */
+	jmp	pnp_return
+
+pnp_set_device_node:
+	/*
+	 * Function 02h is mandatory when system-device nodes are present.
+	 * The sole APM node has no resources and is neither configurable nor
+	 * disableable, so its only valid configuration is already in effect.
+	 * Accept that idempotent request for current and/or next boot.
+	 */
+	movw	%ss:8(%edx), %ax	/* Node value (not a pointer) */
+	testb	%al, %al
+	jnz	1f
+	movw	%ss:14(%edx), %ax	/* Control */
+	testw	$0xfffc, %ax
+	jnz	2f
+	testw	$0x0003, %ax
+	jz	2f
+	xorw	%ax, %ax		/* SUCCESS */
+	jmp	pnp_return
+1:
+	movw	$0x0083, %ax		/* INVALID_HANDLE */
+	jmp	pnp_return
+2:
+	movw	$0x0084, %ax		/* BAD_PARAMETER */
+	jmp	pnp_return
+
+pnp_get_apm_id_table:
+	/*
+	 * Function 0Bh is mandatory for an APM 1.1-or-later BIOS.  It maps
+	 * power-managed motherboard devices to APM class/unit identifiers.
+	 * This minimal BIOS exposes no individually managed devices, so the
+	 * complete mapping table is empty.  PNP0C05 identifies the APM BIOS
+	 * interface itself and is intentionally not such a mapping entry.
+	 */
+	ldsw	%ss:8(%edx), %bx	/* far *BufSize */
+	movw	$0, (%bx)
 	xorw	%ax, %ax		/* SUCCESS */
 
 pnp_return:

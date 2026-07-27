@@ -91,6 +91,7 @@ struct Pc98OpnaState {
 
     AudioBackend *audio_be;
     uint32_t freq;
+    uint32_t isairq;
 
     void *opna;                 /* MAME YM2608 chip instance */
     PSG *ssg;                   /* emu2149 SSG instance      */
@@ -407,7 +408,7 @@ static void pc98_opna_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    qdev_init_gpio_out(dev, &s->irq, 1);
+    s->irq = isa_get_irq(isadev, s->isairq);
     s->sound_id = PC98_OPNA_SOUND_ID;
 
     /* SSG first: the FM core's reset path calls back into it. */
@@ -478,6 +479,7 @@ static void pc98_opna_reset(DeviceState *dev)
 static const Property pc98_opna_properties[] = {
     DEFINE_AUDIO_PROPERTIES(Pc98OpnaState, audio_be),
     DEFINE_PROP_UINT32("freq", Pc98OpnaState, freq, 55466),
+    DEFINE_PROP_UINT32("irq", Pc98OpnaState, isairq, 12),
 };
 
 static void pc98_opna_class_init(ObjectClass *klass, const void *data)
@@ -489,7 +491,6 @@ static void pc98_opna_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, pc98_opna_properties);
     set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->desc = "NEC PC-9801-86 sound board (YM2608 OPNA)";
-    dc->user_creatable = false;
 }
 
 static const TypeInfo pc98_opna_info = {
@@ -505,12 +506,3 @@ static void pc98_opna_register_types(void)
 }
 
 type_init(pc98_opna_register_types)
-
-void pc98_opna_init(ISABus *bus, qemu_irq irq)
-{
-    ISADevice *isadev = isa_new(TYPE_PC98_OPNA);
-    DeviceState *dev = DEVICE(isadev);
-
-    isa_realize_and_unref(isadev, bus, &error_fatal);
-    qdev_connect_gpio_out(dev, 0, irq);
-}

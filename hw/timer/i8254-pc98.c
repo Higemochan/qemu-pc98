@@ -67,9 +67,11 @@
 
 struct Pc98PitState {
     PITCommonState parent_obj;
+
+    Pc98PitSerialClockNotify serial_clock_notify;
+    void *serial_clock_opaque;
 };
 
-#define TYPE_PC98_PIT "pc98-pit"
 OBJECT_DECLARE_SIMPLE_TYPE(Pc98PitState, PC98_PIT)
 
 typedef struct Pc98PitClass {
@@ -236,14 +238,20 @@ static void pc98_pit_get_channel_info(PITCommonState *s, PITChannelState *sc,
     info->out = pc98_pit_get_out(sc, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
-static inline void pit_load_count(PITChannelState *s, int val)
+static inline void pit_load_count(PITCommonState *pit, PITChannelState *s,
+                                  int val)
 {
+    Pc98PitState *ps = PC98_PIT(pit);
+
     if (val == 0) {
         val = 0x10000;
     }
     s->count_load_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     s->count = val;
     pit_irq_timer_update(s, s->count_load_time);
+    if (s == &pit->channels[2] && ps->serial_clock_notify) {
+        ps->serial_clock_notify(ps->serial_clock_opaque, val);
+    }
 }
 
 static void pit_latch_count(PITChannelState *s)
@@ -299,17 +307,17 @@ static void pit_ioport_write(void *opaque, hwaddr addr, uint64_t val,
         switch (s->write_state) {
         default:
         case RW_STATE_LSB:
-            pit_load_count(s, val);
+            pit_load_count(pit, s, val);
             break;
         case RW_STATE_MSB:
-            pit_load_count(s, val << 8);
+            pit_load_count(pit, s, val << 8);
             break;
         case RW_STATE_WORD0:
             s->write_latch = val;
             s->write_state = RW_STATE_WORD1;
             break;
         case RW_STATE_WORD1:
-            pit_load_count(s, s->write_latch | (val << 8));
+            pit_load_count(pit, s, s->write_latch | (val << 8));
             s->write_state = RW_STATE_WORD0;
             break;
         }
@@ -507,4 +515,25 @@ ISADevice *pc98_pit_init(ISABus *bus, qemu_irq alt_irq)
     qdev_connect_gpio_out(dev, 0, alt_irq);
 
     return d;
+}
+
+uint32_t pc98_pit_get_channel_count(ISADevice *dev, unsigned int channel)
+{
+    PITCommonState *pit = PIT_COMMON(dev);
+
+    g_assert(channel < ARRAY_SIZE(pit->channels));
+    return pit->channels[channel].count;
+}
+
+void pc98_pit_set_serial_clock_notifier(ISADevice *dev,
+                                        Pc98PitSerialClockNotify notify,
+                                        void *opaque)
+{
+    Pc98PitState *s = PC98_PIT(dev);
+
+    s->serial_clock_notify = notify;
+    s->serial_clock_opaque = opaque;
+    if (notify) {
+        notify(opaque, pc98_pit_get_channel_count(dev, 2));
+    }
 }

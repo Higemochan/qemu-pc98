@@ -233,8 +233,6 @@ static void pc98_wss_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, pc98_wss_properties);
     set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->desc = "NEC PC-98 built-in WSS (Mate-X PCM, CS4231A)";
-    /* Board-embedded device: created by the pc98 machine, not by the user. */
-    dc->user_creatable = false;
     dc->vmsd = &vmstate_pc98_wss;
 }
 
@@ -251,10 +249,3 @@ static void pc98_wss_register_types(void)
 }
 
 type_init(pc98_wss_register_types)
-
-void pc98_wss_init(ISABus *bus)
-{
-    ISADevice *isadev = isa_new(TYPE_PC98_WSS);
-
-    isa_realize_and_unref(isadev, bus, &error_fatal);
-}

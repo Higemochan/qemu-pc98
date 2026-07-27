@@ -66,6 +66,7 @@ struct Pc98Lgy98State {
 
     NE2000State ne2000;
     qemu_irq irq;
+    uint32_t isairq;
 
     MemoryRegion reg_alias;     /* 0x00D0-0x00DF -> core io 0x00 (16 bytes) */
     MemoryRegion asic_alias;    /* 0x02D0        -> core io 0x10 (2 bytes)  */
@@ -129,6 +130,8 @@ static void pc98_lgy98_realize(DeviceState *dev, Error **errp)
     Pc98Lgy98State *s = PC98_LGY98(dev);
     NE2000State *n = &s->ne2000;
 
+    s->irq = isa_get_irq(isadev, s->isairq);
+
     /* Build the shared NE2000 core I/O region (0x20 bytes, internal decode). */
     ne2000_setup_io(n, dev, 0x20);
 
@@ -177,6 +180,7 @@ static void pc98_lgy98_reset(DeviceState *dev)
 }
 
 static const Property pc98_lgy98_properties[] = {
+    DEFINE_PROP_UINT32("irq", Pc98Lgy98State, isairq, 6),
     DEFINE_NIC_PROPERTIES(Pc98Lgy98State, ne2000.c),
 };
 
@@ -189,7 +193,6 @@ static void pc98_lgy98_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, pc98_lgy98_properties);
     dc->vmsd = &vmstate_pc98_lgy98;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
-    dc->user_creatable = false;
 }
 
 static const TypeInfo pc98_lgy98_info = {
@@ -205,16 +208,3 @@ static void pc98_lgy98_register_types(void)
 }
 
 type_init(pc98_lgy98_register_types)
-
-ISADevice *pc98_lgy98_init(ISABus *bus, qemu_irq irq)
-{
-    ISADevice *isadev;
-    Pc98Lgy98State *s;
-
-    isadev = isa_new(TYPE_PC98_LGY98);
-    s = PC98_LGY98(isadev);
-    s->irq = irq;
-    isa_realize_and_unref(isadev, bus, &error_fatal);
-
-    return isadev;
-}

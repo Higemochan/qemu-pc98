@@ -13,12 +13,13 @@ CFLAGS  := -m16 -march=i486 -ffreestanding -Wall -Werror -Os -fno-pie
 LDFLAGS := -nostdlib -Wl,--build-id=none,-T,$(SRC_DIR)bank.lds,-m,elf_i386,-no-pie
 
 BANKS := pc98itf.bin pc98ide.bin pc98pci.bin pc98bios.bin
+UNIFONT_BDF := $(SRC_DIR)fonts/unifont_jp-17.0.04.bdf.gz
 
 all: $(BANKS)
 
 font: pc98font.bin
 
-pc98font.bin: $(SRC_DIR)makefont.py
+pc98font.bin: $(SRC_DIR)makefont.py $(UNIFONT_BDF)
 	python3 $< $@
 
 qemu-blobs: all font

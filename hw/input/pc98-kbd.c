@@ -29,6 +29,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
+#include "standard-headers/linux/input-event-codes.h"
 #include "hw/core/irq.h"
 #include "hw/isa/isa.h"
 #include "hw/input/pc98-kbd.h"
@@ -276,10 +277,90 @@ static void pc98_kbd_event(DeviceState *dev, QemuConsole *src,
     }
 }
 
+/*
+ * SDL keycodes below 0x80 are the unmodified character printed on the host
+ * key.  Translate those symbols to the corresponding keys on the PC-98 JIS
+ * layout instead of blindly treating a US keyboard as though its physical
+ * punctuation keys had JIS legends.  The Linux keycodes returned here are
+ * deliberately fed through the normal AT-set1-to-PC-98 path above, keeping a
+ * single implementation of make/break and lock-key handling.
+ *
+ * This correspondence follows the SDL keyboard map used by NP21/W.  Symbols
+ * with no direct PC-98 key retain the physical-key fallback.
+ */
+static unsigned int pc98_kbd_keycode_from_keysym(DeviceState *dev,
+                                                  uint32_t keysym,
+                                                  unsigned int keycode)
+{
+    static const uint16_t pc98_symbol_to_linux[128] = {
+        [' ']  = KEY_SPACE,
+        ['0']  = KEY_0,
+        ['1']  = KEY_1,
+        ['2']  = KEY_2,
+        ['3']  = KEY_3,
+        ['4']  = KEY_4,
+        ['5']  = KEY_5,
+        ['6']  = KEY_6,
+        ['7']  = KEY_7,
+        ['8']  = KEY_8,
+        ['9']  = KEY_9,
+        ['-']  = KEY_MINUS,
+        ['=']  = KEY_EQUAL,
+        ['^']  = KEY_EQUAL,
+        ['\\'] = KEY_YEN,
+        ['q']  = KEY_Q,
+        ['w']  = KEY_W,
+        ['e']  = KEY_E,
+        ['r']  = KEY_R,
+        ['t']  = KEY_T,
+        ['y']  = KEY_Y,
+        ['u']  = KEY_U,
+        ['i']  = KEY_I,
+        ['o']  = KEY_O,
+        ['p']  = KEY_P,
+        ['@']  = KEY_LEFTBRACE,
+        ['[']  = KEY_RIGHTBRACE,
+        ['a']  = KEY_A,
+        ['s']  = KEY_S,
+        ['d']  = KEY_D,
+        ['f']  = KEY_F,
+        ['g']  = KEY_G,
+        ['h']  = KEY_H,
+        ['j']  = KEY_J,
+        ['k']  = KEY_K,
+        ['l']  = KEY_L,
+        [';']  = KEY_SEMICOLON,
+        [':']  = KEY_APOSTROPHE,
+        [']']  = KEY_BACKSLASH,
+        ['z']  = KEY_Z,
+        ['x']  = KEY_X,
+        ['c']  = KEY_C,
+        ['v']  = KEY_V,
+        ['b']  = KEY_B,
+        ['n']  = KEY_N,
+        ['m']  = KEY_M,
+        [',']  = KEY_COMMA,
+        ['.']  = KEY_DOT,
+        ['/']  = KEY_SLASH,
+        ['_']  = KEY_RO,
+    };
+    unsigned int mapped;
+
+    if (keysym == 0xa5) { /* Yen sign on macOS layouts */
+        return KEY_YEN;
+    }
+    if (keysym >= ARRAY_SIZE(pc98_symbol_to_linux)) {
+        return keycode;
+    }
+    mapped = pc98_symbol_to_linux[keysym];
+    return mapped ? mapped : keycode;
+}
+
 static const QemuInputHandler pc98_kbd_handler = {
     .name  = "pc98-kbd",
     .mask  = INPUT_EVENT_MASK_KEY,
     .event = pc98_kbd_event,
+    .keycode_from_keysym = pc98_kbd_keycode_from_keysym,
 };
 
 /* --- 8251 USART port interface --- */

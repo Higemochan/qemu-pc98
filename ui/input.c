@@ -135,6 +135,25 @@ qemu_input_find_handler(uint32_t mask, const QemuConsole *con)
     return NULL;
 }
 
+/*
+ * Let keyboards whose key layout differs from the host reinterpret a
+ * frontend key symbol.  The frontend-supplied Linux keycode remains the
+ * fallback, so ordinary keyboards and symbols unknown to the device keep the
+ * traditional physical-key path.
+ */
+unsigned int qemu_input_keycode_from_keysym(const QemuConsole *con,
+                                            uint32_t keysym,
+                                            unsigned int keycode)
+{
+    QemuInputHandlerState *s;
+
+    s = qemu_input_find_handler(INPUT_EVENT_MASK_KEY, con);
+    if (s && s->handler->keycode_from_keysym) {
+        return s->handler->keycode_from_keysym(s->dev, keysym, keycode);
+    }
+    return keycode;
+}
+
 void qemu_input_handler_set_leds_mask(QemuInputHandlerState *s, uint32_t leds_mask)
 {
     assert(s->handler->mask & INPUT_EVENT_MASK_KEY);

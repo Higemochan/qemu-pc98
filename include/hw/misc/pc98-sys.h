@@ -20,5 +20,6 @@ OBJECT_DECLARE_SIMPLE_TYPE(Pc98SysState, PC98_SYS)
  * uses it to choose between a full system reset and a CPU-only reset.
  */
 bool pc98_sys_shutdown_armed(Pc98SysState *s);
+uint8_t pc98_sys_get_portc(Pc98SysState *s);
 
 #endif

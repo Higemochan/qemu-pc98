@@ -21,7 +21,7 @@
  * opaque) but wires the PC-98 port map itself, so the PC/AT ISA IDE
  * model stays untouched.  Both ATA hard disks and ATAPI CD-ROMs are
  * supported (the shared core provides the ATAPI PACKET machinery);
- * a CD-ROM is attached with, e.g., -drive if=ide98,media=cdrom.
+ * a CD-ROM is attached with, e.g., -drive if=ide,media=cdrom.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

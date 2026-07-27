@@ -27,6 +27,10 @@ typedef struct Pc98VgaRegions {
 
 typedef struct Pc98MemState Pc98MemState;
 
+/* Install a C-Bus option ROM behind the machine's POST shadow-RAM gate. */
+void pc98_mem_register_cbus_rom(Pc98MemState *s, MemoryRegion *rom,
+                                hwaddr address);
+
 /* PCI host bridge for the PCI-equipped PC-9821 machines (pc98-pci). */
 #define TYPE_PC98_PCI_HOST "pc98-pcihost"
 

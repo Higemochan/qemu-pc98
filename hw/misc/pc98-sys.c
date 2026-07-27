@@ -88,6 +88,7 @@ struct Pc98SysState {
     uint8_t sys_c;
     uint8_t sys_ctrlword;
     int     sys_c_probe;
+    qemu_irq serial_irq_enable[3];
 
     /* printer 8255 PPI (ports 0x40-0x46) */
     uint8_t prn_a;
@@ -331,10 +332,14 @@ static uint32_t pc98_sysppi_b_read(void *opaque, uint32_t addr)
 static void pc98_sysppi_c_write(void *opaque, uint32_t addr, uint32_t value)
 {
     Pc98SysState *s = opaque;
+    int i;
 
     s->sys_c = value;
     /* PC-98 uses active-low port-C bit 3 for the PIT channel-1 speaker. */
     qemu_set_irq(s->speaker, !(value & 0x08));
+    for (i = 0; i < ARRAY_SIZE(s->serial_irq_enable); i++) {
+        qemu_set_irq(s->serial_irq_enable[i], (value >> i) & 1);
+    }
 }
 
 static uint32_t pc98_sysppi_c_read(void *opaque, uint32_t addr)
@@ -373,6 +378,11 @@ static void pc98_sysppi_ctrl_write(void *opaque, uint32_t addr, uint32_t value)
 bool pc98_sys_shutdown_armed(Pc98SysState *s)
 {
     return (s->sys_c & 0xa0) == 0xa0;
+}
+
+uint8_t pc98_sys_get_portc(Pc98SysState *s)
+{
+    return s->sys_c;
 }
 
 /* --- printer 8255 PPI --- */
@@ -543,6 +553,7 @@ static void pc98_sys_reset(DeviceState *dev)
     s->sys_c = 0xff;
     s->sys_c_probe = 8;
     s->sys_ctrlword = 0x92;
+    pc98_sysppi_c_write(s, 0, s->sys_c);
 
     s->prn_a = 0xff;
     s->prn_b = 0x00;
@@ -564,6 +575,9 @@ static void pc98_sys_realize(DeviceState *dev, Error **errp)
 
     qdev_init_gpio_out(dev, &s->irq, 1);
     qdev_init_gpio_out_named(dev, &s->speaker, "speaker", 1);
+    qdev_init_gpio_out_named(dev, s->serial_irq_enable,
+                             "serial-irq-enable",
+                             ARRAY_SIZE(s->serial_irq_enable));
 
     s->tick_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, pc98_sys_tick, s);
     timer_mod(s->tick_timer,

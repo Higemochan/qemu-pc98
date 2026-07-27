@@ -168,10 +168,40 @@ struct Pc98MemState {
     uint8_t bios_probe_write; /* PCI config 0x69 bit 4 */
     uint8_t f8e90_reset;
     uint8_t f8e90_value;      /* current IDE probe bitmap (the latch) */
+    GPtrArray *cbus_option_roms;
+    bool cbus_rom_gate;
 
     void (*ems_cb)(void *opaque, uint32_t value);
     void *ems_cb_arg;
 };
+
+static void mem_apply_cbus_rom_gate(Pc98MemState *s, bool enable)
+{
+    unsigned i;
+
+    s->cbus_rom_gate = enable;
+    memory_region_transaction_begin();
+    for (i = 0; i < s->cbus_option_roms->len; i++) {
+        MemoryRegion *rom = g_ptr_array_index(s->cbus_option_roms, i);
+
+        memory_region_set_enabled(rom, enable);
+    }
+    memory_region_transaction_commit();
+}
+
+/*
+ * Register an option ROM installed on the C-Bus.  Xa-class chipsets keep
+ * C0000h-DFFFFh shadow RAM in front of expansion ROMs during POST, then
+ * expose the ROMs together with the late option-ROM gate.  Older machines
+ * expose C-Bus ROMs from reset.
+ */
+void pc98_mem_register_cbus_rom(Pc98MemState *s, MemoryRegion *rom,
+                                hwaddr address)
+{
+    g_ptr_array_add(s->cbus_option_roms, rom);
+    memory_region_add_subregion_overlap(&s->lowmem, address, rom, 1);
+    memory_region_set_enabled(rom, s->cbus_rom_gate);
+}
 
 /* apply the state of one movable RAM window */
 static void mem_apply_window(Pc98MemState *s, int idx)
@@ -606,6 +636,7 @@ static void mem_romgate_write(void *opaque, uint32_t addr, uint32_t data)
      */
     if (s->has_pci && !old_ide_rom_gate && s->ide_rom_gate) {
         mem_patch_bios_workarea(s);
+        mem_apply_cbus_rom_gate(s, true);
     }
     mem_apply_dwin(s);
     if (s->has_pci) {
@@ -847,10 +878,20 @@ static bool mem_load_firmware(Pc98MemState *s, uint8_t *buf)
         }
     }
 
-    /* BIOS: hide the PnP BIOS signature so the guest skips PnP enumeration */
+    /*
+     * The Xa7 dump publishes a PnP entry in the pageable D8000 ROM bank,
+     * which is not implemented yet.  Keep that structure hidden rather than
+     * letting a guest call into the IDE ROM currently visible at D8000.
+     *
+     * The free BIOS entry is permanently mapped at FD80:1800 and is safe to
+     * expose.  It can be distinguished by the real-mode segment in the
+     * installation-check structure, so do not hide every $PnP signature as
+     * the original workaround did.
+     */
     for (i = 0x8000; i < 0x18000; i += 0x10) {
         uint8_t *p = buf + OFF_BIOS + i;
-        if (p[0] == 0x24 && p[1] == 'P' && p[2] == 'n' && p[3] == 'P') {
+        if (p[0] == 0x24 && p[1] == 'P' && p[2] == 'n' && p[3] == 'P' &&
+            lduw_le_p(p + 15) == 0xd800) {
             p[0] = 'n';
             p[2] = 0x24;
             break;
@@ -885,6 +926,7 @@ static void pc98_mem_reset(void *opaque)
     s->ide_rom_gate = s->has_pci ? 0 : 1;
     s->ide_ram_gate = 1;
     mem_apply_dwin(s);
+    mem_apply_cbus_rom_gate(s, !s->has_pci);
 
     s->bios_ram_gate = 0;
     memory_region_set_enabled(&s->e8000_ram, false);
@@ -950,6 +992,8 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
     s->hd_mask = hd_connect;
     s->has_pci = has_pci;
     s->has_pegc = has_pegc;
+    s->cbus_option_roms = g_ptr_array_new();
+    s->cbus_rom_gate = !has_pci;
     s->sys16m = 1;
     s->ems_cb = ems_select;
     s->ems_cb_arg = ems_opaque;

@@ -34,10 +34,10 @@
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/audio/pcspk.h"
-#include "hw/audio/pc98-wss.h"
-#include "hw/audio/pc98-opna.h"
 #include "hw/block/pc98-fdc.h"
+#include "hw/char/pc98-serial.h"
 #include "hw/display/pc98-coregraph.h"
 #include "hw/display/pc98-vga.h"
 #include "hw/display/pc98-wab.h"
@@ -51,7 +51,7 @@
 #include "hw/intc/i8259-pc98.h"
 #include "hw/isa/isa.h"
 #include "hw/misc/pc98-sys.h"
-#include "hw/net/pc98-lgy98.h"
+#include "hw/scsi/pc98-scsi.h"
 #include "hw/pci/pci.h"
 #include "hw/core/sysbus.h"
 #include "hw/timer/i8254-pc98.h"
@@ -60,6 +60,7 @@
 #include "system/memory.h"
 #include "system/reset.h"
 #include "system/runstate.h"
+#include "system/system.h"
 #include "system/tcg.h"
 #include "target/i386/cpu.h"
 
@@ -341,7 +342,7 @@ static void pc98_devices_init(Pc98MachineState *pms)
         int j;
 
         for (j = 0; j < 4; j++) {
-            hd[j] = drive_get(IF_IDE98, j / 2, j % 2);
+            hd[j] = drive_get(IF_IDE, j / 2, j % 2);
         }
         idedev = pc98_ide_init(isa_bus, hd, x86ms->gsi[9]);
         pms->ide = PC98_IDE(idedev);
@@ -352,6 +353,14 @@ static void pc98_devices_init(Pc98MachineState *pms)
     isa_realize_and_unref(sysdev, isa_bus, &error_fatal);
     qdev_connect_gpio_out(DEVICE(sysdev), 0, x86ms->gsi[15]);
     pms->sys = PC98_SYS(sysdev);
+
+    /* Standard -serial selects the PC-98 built-in uPD8251 interface. */
+    if (serial_hd(0)) {
+        ISADevice *serial = isa_new(TYPE_PC98_SERIAL);
+
+        qdev_prop_set_chr(DEVICE(serial), "chardev", serial_hd(0));
+        isa_realize_and_unref(serial, isa_bus, &error_fatal);
+    }
 
     /* PIT channel 1, gated by active-low system-PPI port-C bit 3. */
     {
@@ -383,6 +392,16 @@ static void pc98_devices_init(Pc98MachineState *pms)
                              pc98_vga_select_ems, pms->vga);
 
     /*
+     * PC-9801-92 compatible C-Bus SCSI interface.  It is created only when
+     * an if=scsi drive is present, so its option ROM cannot perturb the
+     * ordinary IDE-only firmware path.  Create it after the memory
+     * controller so the option ROM can join the Xa POST shadow-RAM gate.
+    */
+    if (drive_get_max_bus(IF_SCSI) >= 0) {
+        pc98_scsi_init(isa_bus, pms->mem);
+    }
+
+    /*
      * Window Accelerator Board (Cirrus GD5426 behind the NEC LSI).
      *
      * The legacy WAB's fixed 15 MiB aperture conflicts with RAM after the
@@ -393,24 +412,6 @@ static void pc98_devices_init(Pc98MachineState *pms)
     if (pmc->has_wab) {
         pc98_wab_init(isa_bus, !pmc->has_pci);
     }
-
-    /* LGY-98 C-bus Ethernet (NE2000-compatible, IRQ6) */
-    pc98_lgy98_init(isa_bus, x86ms->gsi[6]);
-
-    /*
-     * Built-in WSS / Mate-X PCM (CS4231A codec, initially IRQ12/DMA1).
-     * Firmware and PnP software may change both resources through 0x0f40.
-     * They resolve through the ISA bus and the PC-98 DMA controller.
-     */
-    pc98_wss_init(isa_bus);
-
-    /*
-     * PC-9801-86 sound board (YM2608 OPNA + SSG) at 0x188-0x18E.  The Xa7
-     * firmware programs the built-in WSS for IRQ3, so use the 86 board's
-     * alternate INT5 setting (IRQ12) to keep the two sound interrupt sources
-     * separate.
-     */
-    pc98_opna_init(isa_bus, x86ms->gsi[12]);
 
     /*
      * PCI host bridge (pc98-pci only).  PC-98 uses Configuration
@@ -503,13 +504,14 @@ static void pc98_class_init(ObjectClass *oc, const void *data)
     mc->init = pc98_machine_state_init;
     mc->reset = pc98_machine_reset;
     mc->get_kernel_irqchip_default = pc98_get_kernel_irqchip_default;
-
     mc->family = "pc98";
     mc->desc = "NEC PC-9821";
     mc->max_cpus = 1;
     mc->default_cpu_type = X86_CPU_TYPE_NAME("486");
     mc->default_ram_size = 16 * MiB;
     mc->default_ram_id = "pc98.ram";
+    mc->block_default_type = IF_IDE;
+    mc->no_serial = 1;
     mc->no_parallel = 1;
     mc->no_cdrom = 1;
 
