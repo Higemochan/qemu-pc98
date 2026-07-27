@@ -1,17 +1,17 @@
 /*
- * Minimal PC-9821 BIOS / IDE BIOS Bank3
- * Copyright (C) 2026 Awe Morris
+ * Minimal PC-9821 BIOS / IDE BIOS bank 3
  *
- * The private disk option-ROM ABI used by Xa7-family main BIOS.  It provides
- * the HDD services needed by the IPL and DOS through INT 1Bh, using polled ATA
+ * This is the first deliberately small implementation of the private disk
+ * option-ROM ABI used by the Xa7-family main BIOS.  It provides the HDD
+ * services needed by the IPL and DOS through INT 1Bh, using polled ATA
  * PIO.  ATAPI and interrupt-driven transfers are intentionally left for a
  * later revision.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-	.code16
-	.text
+.code16
+.text
 
 	.equ	IDE_CHANNEL,	0x0432
 	.equ	IDE_DATA,	0x0640
@@ -30,15 +30,6 @@
 	.equ	PIC2_DATA,	0x000a
 
 	.equ	ATA_SRST,	0x06
-	/*
-	 * Xa7's internal IDE BIOS transfers through READ/WRITE MULTIPLE.  The
-	 * drive powers up with a 16-sector multiple block on this controller,
-	 * and the data port remains a plain 16-bit PIO stream, so the existing
-	 * per-sector copy loop also handles the larger DRQ blocks.  Using the
-	 * single-sector commands made NTLDR issue thousands of command cycles
-	 * while loading Windows and turned its dirty-volume check into a
-	 * several-minute apparent hang.
-	 */
 	.equ	ATA_READ,	0xc4
 	.equ	ATA_WRITE,	0xc5
 	.equ	ATA_IDENTIFY,	0xec
@@ -65,7 +56,7 @@
 	.equ	BOOT_SEGMENT,	0x1fc0
 
 	/*
-	 * The ITF makes the 0xDB000 page writable shadow RAM.  The stock disk
+	 * The ITF makes the 0xDB000 page writable shadow RAM.  The NEC disk
 	 * ROM uses that page for its private state as well, so keep detected
 	 * geometry there rather than consuming an undocumented main-BIOS work
 	 * area cell.  These offsets are relative to the D800 ROM segment.
@@ -77,7 +68,7 @@
 	/*
 	 * The main BIOS indexes this table in three-byte slots.  Keep even the
 	 * declined entries and the nonstandard signature byte-for-byte
-	 * compatible with the Xa7C9W ROM.
+	 * compatible with the NEC Xa7C9W ROM.
 	 */
 	.globl	_start
 _start:

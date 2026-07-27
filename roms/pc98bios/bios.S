@@ -1,5 +1,5 @@
 /*
- * Minimal PC-9821 BIOS / Main BIOS Bank
+ * Minimal PC-9821 BIOS / Main BIOS banks.
  * Copyright (C) 2026 Awe Morris
  *
  * The combined image occupies banks 5-7 (E8000h-FFFFFh).  The ITF enters
@@ -77,6 +77,34 @@
 	movw	$(\handler - FD80_FILE_BASE), (4 * \number)
 	movw	$BIOS_SEG, (4 * \number + 2)
 	.endm
+
+	/*
+	 * Plug and Play BIOS 1.0A installation-check structure.
+	 *
+	 * NEC's Xa7 firmware publishes this at physical F51B0h.  Windows uses
+	 * the bi-modal entry point while constructing its legacy system-device
+	 * tree, so merely providing the INT 1Fh APM calls is not sufficient.
+	 * Keep the entry in the permanently mapped FD80 bank instead of the
+	 * pageable D800 option-ROM window used by the original firmware.
+	 *
+	 * The byte checksum over all 21h bytes is 05h for the fixed 1800h
+	 * entry offset and FD800h protected-mode code base below.
+	 */
+	.org	0x0d1b0
+pnp_installation_check:
+	.ascii	"$PnP"
+	.byte	0x10			/* specification version 1.0 */
+	.byte	0x21			/* structure length */
+	.word	0x0000			/* no event notification */
+	.byte	0x05			/* eight-bit structure checksum */
+	.long	0x00000000		/* no event-notification flag */
+	.word	0x1800			/* real-mode entry offset */
+	.word	BIOS_SEG		/* real-mode entry segment */
+	.word	0x1800			/* protected-mode entry offset */
+	.long	0x000fd800		/* protected-mode code-segment base */
+	.ascii	"PC98"			/* OEM device identifier */
+	.word	0x0000			/* real-mode BIOS data segment */
+	.long	0x00000000		/* protected-mode BIOS data base */
 
 	/*
 	 * PC-9821 machine-capability table at physical F8E80h.
@@ -165,9 +193,10 @@ cold_start:
 	movw	$0x0480, 0x0486
 	/*
 	 * BIOS_FLAG3 bit 6 advertises the extended PC-9821 keyboard command
-	 * set; bit 1 is the companion Xa-class system capability flag.  The
-	 * NEC Xa7 BIOS exposes 42h, which is also the value expected by the
-	 * PC-98 platform classification in Windows NT.
+	 * set; bit 1 is the companion Xa-class system capability flag.  Keep
+	 * both bits for the NT keyboard/platform classification used during
+	 * setup.  A separate Windows 2000 boot test with only bit 1 cleared
+	 * remained stuck at the same point.
 	 */
 	orb	$0x42, 0x0481
 	movb	$0x96, 0x0485		/* FDC interrupt-completion countdown */
@@ -197,20 +226,17 @@ cold_start:
 	movb	$0xff, 0x05ca
 	movb	$0x96, 0x05cb
 	/*
-	 * Xa-class NT compatibility value.  The NEC IDE BIOS publishes the
-	 * precise drive map in 0457h/05BAh/F8E90h; 05B0h must remain FFh when
-	 * the second device on each channel is absent.  NP21/W carries the
-	 * same workaround for the NT IDE driver, which otherwise falls back to
-	 * its legacy single-sector path.
+	 * Xa7 drive-class summary observed after the IDE option ROM probe.
+	 * The precise drive map remains in 0457h/05BAh/F8E90h.
 	 */
-	movb	$0xff, 0x05b0
+	movb	$0x07, 0x05b0
 	/*
-	 * Xa7 POST sets the expansion-equipment summary after probing the
-	 * integrated devices.  Bit 7 is present on this fixed pc9821 profile.
-	 * Keep the stock value here even though legacy PC-9801-86 software
-	 * normally probes the sound board directly through 0A460h/0188h.
+	 * Xa7 POST clears the expansion-equipment summary after probing the
+	 * integrated devices.  Keep the hand-off value observed by NTDETECT;
+	 * legacy PC-9801-86 software probes the sound board directly through
+	 * 0A460h/0188h.
 	 */
-	movb	$0x80, 0x05b3
+	movb	$0x00, 0x05b3
 	call	keyboard_init
 	call	crt_init
 	call	dma_init
@@ -404,10 +430,12 @@ crt_init:
 	ret
 
 /*
- * Draw "Memory N MB  OK" in the centre of the power-on text screen.
+ * Draw the NEC-style "MEMORY 640KB + nKB OK" at the upper left.
  * PC-98 text VRAM stores a 16-bit character cell at A000:row*160 and an
  * attribute byte for that cell 2000h bytes later.  WA_EXTMEM (0594h) is the
- * number of whole megabytes above the reserved 16-MiB boundary.
+ * number of whole megabytes above the reserved 16-MiB boundary.  The second
+ * number is memory above the conventional first MiB, so a 64-MiB machine
+ * reports 63 * 1024 = 64512 KiB.
  */
 post_memory_message:
 	pushw	%ax
@@ -420,20 +448,21 @@ post_memory_message:
 
 	movw	$0xa000, %ax
 	movw	%ax, %es
-	movw	$(10 * 160 + 24 * 2), %di
+	xorw	%di, %di
 	movw	$(post_memory_prefix - FD80_FILE_BASE), %si
 	call	post_puts
 
-	movw	0x0594, %ax
-	addw	$16, %ax
+	movzwl	0x0594, %eax
+	addl	$15, %eax
+	shll	$10, %eax
 	xorw	%cx, %cx
-	movw	$10, %bx
+	movl	$10, %ebx
 1:
-	xorw	%dx, %dx
-	divw	%bx
+	xorl	%edx, %edx
+	divl	%ebx
 	pushw	%dx
 	incw	%cx
-	testw	%ax, %ax
+	testl	%eax, %eax
 	jnz	1b
 2:
 	popw	%ax
@@ -470,9 +499,9 @@ post_putc:
 	ret
 
 post_memory_prefix:
-	.asciz	"Memory "
+	.asciz	"MEMORY 640KB + "
 post_memory_suffix:
-	.asciz	" MB  OK"
+	.asciz	"KB OK"
 
 post_delay_done:
 	iret
@@ -644,11 +673,15 @@ timer_no_single:
 	cmpw	$0, BEEP_COUNT
 	jne	timer_continue
 
-	/* No timer source remains: mask IRQ0 and do not re-arm the PIT. */
-	inb	$PIC1_DATA, %al
-	orb	$0x01, %al
-	outb	%al, $0x5f
-	outb	%al, $PIC1_DATA
+	/*
+	 * No BIOS-owned timer source remains.  Do not mask IRQ0 here: DOS
+	 * applications commonly replace vector 08h, program PIT channel 0 as
+	 * a periodic clock, and chain to the old BIOS handler.  Masking the
+	 * line from the chained handler lets exactly one application tick
+	 * through and then freezes all time-based rendering (Suika3's message
+	 * window was the visible symptom).  Explicit BIOS one-shots still mask
+	 * the line in timer_expired before invoking their callback.
+	 */
 	popw	%ds
 	cli
 	movb	$0x20, %al
@@ -844,6 +877,8 @@ int18:
 	je	int18_text_start
 	cmpb	$0x0d, %ah
 	je	int18_text_stop
+	cmpb	$0x0e, %ah
+	je	int18_text_area
 	cmpb	$0x10, %ah
 	je	int18_cursor_type
 	cmpb	$0x11, %ah
@@ -955,6 +990,54 @@ int18_text_stop:
 	pushw	%ax
 	movb	$0x0c, %al
 	outb	%al, $GDC_TEXT_CMD
+	popw	%ax
+	jmp	int18_return
+
+/*
+ * AH=0Eh -- set the first text display area.
+ *
+ * DX is a byte offset in text VRAM; the master GDC consumes a word address.
+ * Its SCROLL descriptor encodes the line count shifted left by four.  The
+ * Xa-class 31-kHz mode selected by CRT_MODE bit 7 has 400 raster lines,
+ * otherwise the legacy mode has 200.  Clear the remaining three descriptors
+ * exactly as the firmware service does, so stale split-screen areas cannot
+ * survive a mode change.  Windows 2000's real-mode loader calls this service
+ * with DX=0 before clearing the startup display.
+ */
+int18_text_area:
+	pushw	%ax
+	pushw	%cx
+	pushw	%dx
+
+	movw	%dx, %ax
+	shrw	$1, %ax
+	movw	%ax, 0x0548
+	movw	$0x0c80, %cx		/* 200 << 4 */
+	testb	$0x80, CRT_MODE
+	jz	1f
+	movw	$0x1900, %cx		/* 400 << 4 */
+1:
+	movw	%cx, 0x054a
+
+	movw	%ax, %dx
+	movb	$0x70, %al		/* SCROLL */
+	outb	%al, $GDC_TEXT_CMD
+	movb	%dl, %al
+	outb	%al, $GDC_TEXT_PARAM
+	movb	%dh, %al
+	outb	%al, $GDC_TEXT_PARAM
+	movb	%cl, %al
+	outb	%al, $GDC_TEXT_PARAM
+	movb	%ch, %al
+	outb	%al, $GDC_TEXT_PARAM
+	xorb	%al, %al
+	movw	$12, %cx
+2:
+	outb	%al, $GDC_TEXT_PARAM
+	loop	2b
+
+	popw	%dx
+	popw	%cx
 	popw	%ax
 	jmp	int18_return
 
@@ -1106,10 +1189,15 @@ int18_graph_area:
 	cmpb	$0xc0, %al
 	jne	6f
 
-	movb	$0x83, %al
-	outb	%al, $GDC_MODE_2
-	movb	$0x85, %al
-	outb	%al, $GDC_MODE_2
+	/*
+	 * Xa7's BIOS first stops the slave sequencer and loads the 400-line
+	 * timing while it is still in the old clock mode.  It then changes
+	 * the clock flip-flops, selects SLAVE again, and reloads the timing.
+	 * Some direct-GDC software depends on the complete transition rather
+	 * than merely on the final SYNC and PITCH register contents.
+	 */
+	movb	$0x05, %al
+	outb	%al, $GDC_GRAPH_CMD
 
 	movb	$0x0e, %al		/* SYNC */
 	outb	%al, $GDC_GRAPH_CMD
@@ -1125,9 +1213,48 @@ int18_graph_area:
 	jnz	7b
 	popw	%si
 
+	movb	$0x83, %al
+	outb	%al, $GDC_MODE_2
+	movb	$0x85, %al
+	outb	%al, $GDC_MODE_2
+
+	movb	$0x6e, %al		/* SLAVE */
+	outb	%al, $GDC_GRAPH_CMD
+	movb	$0x0e, %al		/* SYNC */
+	outb	%al, $GDC_GRAPH_CMD
+	movw	$(gdc_slave_sync_400 - FD80_FILE_BASE), %dx
+	pushw	%si
+	movw	%dx, %si
+	movw	$8, %dx
+11:
+	movb	%cs:(%si), %al
+	outb	%al, $GDC_GRAPH_PARAM
+	incw	%si
+	decw	%dx
+	jnz	11b
+	popw	%si
+
 	movb	$0x47, %al		/* PITCH */
 	outb	%al, $GDC_GRAPH_CMD
 	movb	$80, %al
+	outb	%al, $GDC_GRAPH_PARAM
+
+	movb	$0x46, %al		/* ZOOM */
+	outb	%al, $GDC_GRAPH_CMD
+	xorb	%al, %al
+	outb	%al, $GDC_GRAPH_PARAM
+
+	/*
+	 * Clear the 200-line compatibility mode.  This is the critical part
+	 * of selecting ALL: without it only the upper half of Suika3's
+	 * 640x400 surface is scanned out, hiding its message window.
+	 */
+	movb	$0x08, %al
+	outb	%al, $GDC_MODE_1
+
+	movb	$0x4b, %al		/* CSRFORM */
+	outb	%al, $GDC_GRAPH_CMD
+	xorb	%al, %al
 	outb	%al, $GDC_GRAPH_PARAM
 
 	/*
@@ -1179,8 +1306,32 @@ int18_graph_area:
 	outb	%al, $GDC_GRAPH_PARAM
 	outb	%al, $GDC_GRAPH_PARAM
 	outb	%al, $GDC_GRAPH_PARAM
-	movb	$0x19, %al
+	movb	$0x59, %al
 	outb	%al, $GDC_GRAPH_PARAM
+
+	/*
+	 * Complete the Xa7 BIOS's ALL-screen transition.  In particular,
+	 * clear the second display partition through TEXTW before START.
+	 * Suika3 assumes this postcondition and otherwise leaves its lower
+	 * message plane outside the active GDC partition.
+	 */
+	movb	$0x20, %al		/* WRITE, replace mode */
+	outb	%al, $GDC_GRAPH_CMD
+	movb	$0x78, %al		/* TEXTW: clear partition 2 address */
+	outb	%al, $GDC_GRAPH_CMD
+	xorb	%al, %al
+	outb	%al, $GDC_GRAPH_PARAM
+	outb	%al, $GDC_GRAPH_PARAM
+	movb	$0x0d, %al		/* START */
+	outb	%al, $GDC_GRAPH_CMD
+	movb	$0x05, %al
+	outb	%al, $GDC_GRAPH_CMD
+	movb	$0x0e, %al		/* restore the leading SYNC mode byte */
+	outb	%al, $GDC_GRAPH_CMD
+	movb	$0x02, %al
+	outb	%al, $GDC_GRAPH_PARAM
+	movb	$0x01, %al
+	outb	%al, $GDC_MODE_2
 
 5:
 	/* Publish the selected LOWER/UPPER/ALL class in CRT_BIOS bits 1:0. */
@@ -1198,13 +1349,22 @@ int18_graph_area:
 9:
 	orb	%al, 0x0597
 
-	/* One raster per GDC row in the 400-line mode used by this machine. */
+	/*
+	 * For half-screen modes the cursor-form command is still needed.
+	 * ALL already programmed the NEC BIOS's single zero parameter
+	 * before SCROLL above.
+	 */
+	movb	%ch, %al
+	andb	$0xc0, %al
+	cmpb	$0xc0, %al
+	je	12f
 	movb	$0x4b, %al		/* CSRFORM */
 	outb	%al, $GDC_GRAPH_CMD
 	xorb	%al, %al
 	outb	%al, $GDC_GRAPH_PARAM
 	outb	%al, $GDC_GRAPH_PARAM
 	outb	%al, $GDC_GRAPH_PARAM
+12:
 	popw	%dx
 	popw	%ax
 	jmp	int18_return
@@ -1307,7 +1467,7 @@ int1a:
 	.fill	0x19 - (. - int1a), 1, 0x90
 int1a_legacy_entry:
 	/*
-	 * The stock dispatcher accepts AH=00h..1Fh here and returns through
+	 * The NEC dispatcher accepts AH=00h..1Fh here and returns through
 	 * POP DX, POP DS, IRET.  NEC DOS's temporary INT 1Ah wrapper enters the
 	 * fixed +19h entry after PUSH DS, PUSH DX; restoring them in the wrong
 	 * order leaves DS equal to the caller's DX and redirects its following
@@ -1374,7 +1534,7 @@ int1b:
 	movw	%sp, %bp
 	/*
 	 * The option-ROM ABI enters with DS=0000h.  Besides giving the disk
-	 * BIOS access to the work area, the stock dispatcher publishes the
+	 * BIOS access to the work area, the NEC dispatcher publishes the
 	 * active ROM entry in 04ACh before every transfer.  IOS inspects this
 	 * cell when it decides whether the native IDE path can replace the
 	 * real-mode mapper.  boot_entry temporarily uses the same cell for the
@@ -2370,6 +2530,109 @@ ascii_table:
 	.ascii	"zxcvbnm,./"
 	.byte	0x00, 0x20
 ascii_table_end:
+
+	/*
+	 * Plug and Play BIOS bi-modal runtime entry at FD80:1800h.
+	 *
+	 * The interface follows the 1.0A 16-bit C stack convention.  Both real
+	 * mode and protected-mode callers pass 16-bit arguments; far pointers
+	 * contain either real-mode segments or selectors.  All registers and
+	 * FLAGS except AX are preserved as required by the specification.
+	 */
+	.org	0x17000
+pnp_bios_entry:
+	pushw	%bp
+	movw	%sp, %bp
+	pushf
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+	pushw	%si
+	pushw	%di
+	pushw	%ds
+	pushw	%es
+
+	movw	6(%bp), %ax		/* Function */
+	testw	%ax, %ax
+	jz	pnp_get_num_nodes
+	cmpw	$0x0001, %ax
+	je	pnp_get_device_node
+	movw	$0x0082, %ax		/* FUNCTION_NOT_SUPPORTED */
+	jmp	pnp_return
+
+pnp_get_num_nodes:
+	/*
+	 * Function 00h:
+	 *   far *NumNodes at +08h, far *NodeSize at +0Ch.
+	 */
+	ldsw	8(%bp), %bx
+	movb	$1, (%bx)
+	ldsw	12(%bp), %bx
+	movw	$(pnp_apm_node_end - pnp_apm_node), (%bx)
+	xorw	%ax, %ax		/* SUCCESS */
+	jmp	pnp_return
+
+pnp_get_device_node:
+	/*
+	 * Function 01h:
+	 *   far *Node at +08h, far *buffer at +0Ch, Control at +10h.
+	 * Only current (1) or next-boot (2) configuration is valid.
+	 */
+	movw	16(%bp), %ax
+	cmpw	$0x0001, %ax
+	je	1f
+	cmpw	$0x0002, %ax
+	je	1f
+	movw	$0x0084, %ax		/* BAD_PARAMETER */
+	jmp	pnp_return
+1:
+	ldsw	8(%bp), %bx
+	cmpb	$0, (%bx)
+	je	2f
+	movw	$0x0083, %ax		/* INVALID_HANDLE */
+	jmp	pnp_return
+2:
+	lesw	12(%bp), %di
+	pushw	%cs
+	popw	%ds
+	movw	$(pnp_apm_node - FD80_FILE_BASE), %si
+	movw	$(pnp_apm_node_end - pnp_apm_node), %cx
+	cld
+	rep	movsb
+
+	/* Tell the caller that this was the final node. */
+	ldsw	8(%bp), %bx
+	movb	$0xff, (%bx)
+	xorw	%ax, %ax		/* SUCCESS */
+
+pnp_return:
+	popw	%es
+	popw	%ds
+	popw	%di
+	popw	%si
+	popw	%dx
+	popw	%cx
+	popw	%bx
+	popf
+	popw	%bp
+	lret
+
+	/*
+	 * Static APM BIOS system device, PNP0C05.  The three resource blocks
+	 * contain only End Tags because the interface itself owns no I/O, IRQ,
+	 * DMA or memory resource.  Attribute bits 1:0 mark it non-configurable
+	 * and non-disableable.
+	 */
+pnp_apm_node:
+	.word	pnp_apm_node_end - pnp_apm_node
+	.byte	0x00			/* node handle */
+	.byte	0x41, 0xd0, 0x0c, 0x05	/* compressed PNP0C05 */
+	.byte	0x08, 0x00, 0x00	/* system peripheral */
+	.word	0x0003			/* static, required device */
+	.byte	0x79, 0x00		/* allocated-resource End Tag */
+	.byte	0x79, 0x00		/* possible-resource End Tag */
+	.byte	0x79, 0x00		/* compatible-ID End Tag */
+pnp_apm_node_end:
 
 	/* CPU reset while the main bank is already selected. */
 	.org	0x17ff0

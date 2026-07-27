@@ -1,6 +1,6 @@
 /*
- * Minimal PC-9821 BIOS / IDE BIOS Bank3
- * Copyright (C) 2026 Awe Morris
+ * Minimal PC-9821 BIOS / PCI option ROM, bank 0
+*  Copyright (C) 2026 Awe Morris
  *
  * The main BIOS maps this bank into the D8000 option window and enters +1Bh
  * for INT 1Ah functions AH=B1h/B4h.  The handler below implements the
@@ -9,11 +9,11 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-	.code16
-	.text
+.code16
+.text
 
-	.equ	PCI_ADDR,	0x0cf8
-	.equ	PCI_DATA,	0x0cfc
+	.equ	PCI_ADDR,		0x0cf8
+	.equ	PCI_DATA,		0x0cfc
 	.equ	PCI_SUCCESS,		0x00
 	.equ	PCI_FUNC_UNSUPPORTED,	0x81
 	.equ	PCI_BAD_VENDOR,		0x83
@@ -384,7 +384,7 @@ pci_success:
 pci_return:
 	/*
 	 * The PCI BIOS status is returned in AH while AL continues to identify
-	 * the B1xx subfunction.  The NEC ROM preserves it even when config
+	 * the B1xx subfunction.  The stock ROM preserves it even when config
 	 * reads use EAX internally.  B4xx has its own full-AX return values.
 	 */
 	cmpb	$0xb1, -1(%bp)

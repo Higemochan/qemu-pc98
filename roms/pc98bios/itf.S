@@ -1,5 +1,5 @@
 /*
- * Minimal PC-9821 BIOS / ITF Bank4
+ * Minimal PC-9821 BIOS / ITF, bank 4
  * Copyright (C) 2026 Awe Morris
  *
  * The bank is paged into the 0xF8000-0xFFFFF window and is the bank selected
@@ -846,7 +846,7 @@ sdip_table_end:
 	 * already loaded by the caller.  Keeping it to these two instructions
 	 * matters: at 0x04F8 anything longer would run into the work-area
 	 * cells at 0x0500, and the disk BIOS jumps here the same way, so the
-	 * calling convention has to stay the stock one.
+	 * calling convention has to stay the NEC one.
 	 *
 	 * FD80:0002 is the main BIOS entry taken once the ITF has finished.
 	 * It is deliberately not FD80:0000, the address behind the CPU reset
