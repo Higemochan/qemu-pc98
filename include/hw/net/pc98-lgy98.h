@@ -15,7 +15,7 @@
 /*
  * Create the LGY-98 C-bus Ethernet card (NE2000/DP8390-compatible), a
  * wrapper around the shared NE2000 core mapped onto the PC-98 port block
- * at 0x10D0.  @irq is the C-bus interrupt line (LGY-98 default INT is IRQ6).
+ * at 0x00D0.  @irq is the C-bus interrupt line (LGY-98 default INT is IRQ6).
  */
 ISADevice *pc98_lgy98_init(ISABus *bus, qemu_irq irq);
 

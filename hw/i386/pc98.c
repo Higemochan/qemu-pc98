@@ -95,6 +95,7 @@ struct Pc98MachineState {
     Pc98SysState *sys;
     Pc98VgaState *vga;
     Pc98IdeState *ide;
+    uint8_t shutdown_index;
 
     PortioList portio_list;
 };
@@ -224,6 +225,31 @@ static uint32_t pc98_wait_strap_read(void *opaque, uint32_t addr)
 }
 
 /*
+ * Firmware-initiated power off.
+ *
+ * qemu/9821 inherited the Bochs BIOS convention at port 0x8900.  Keep the
+ * eight-byte signature rather than making any single accidental access
+ * destructive.  The free BIOS uses this as the hardware back end for the
+ * PC-98 APM BIOS interface (INT 1fh, AX=9a07h).
+ */
+static void pc98_bios_shutdown_write(void *opaque, uint32_t addr,
+                                     uint32_t value)
+{
+    static const char signature[] = "Shutdown";
+    Pc98MachineState *pms = opaque;
+
+    if (value == signature[pms->shutdown_index]) {
+        pms->shutdown_index++;
+        if (pms->shutdown_index == sizeof(signature) - 1) {
+            pms->shutdown_index = 0;
+            qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+        }
+    } else {
+        pms->shutdown_index = 0;
+    }
+}
+
+/*
  * 0xf070-0xf07f: optional chipset feature-detection registers probed by the
  * Xa7-class firmware (e.g. 0xf074 bit 3 -> BIOS work-area 0x480 bit 3).  We
  * model none of these devices; return 0 ("feature absent") rather than the
@@ -243,6 +269,7 @@ static const MemoryRegionPortio pc98_board_ports[] = {
                     .write = pc98_a20_cmd_write },
     { 0x534,  1, 1, .read = pc98_cpu_mode_read,
                     .write = pc98_reset_latch_write },
+    { 0x8900, 1, 1, .write = pc98_bios_shutdown_write },
     { 0x9894, 1, 1, .read = pc98_wait_strap_read },
     { 0xf070, 16, 1, .read = pc98_f07x_read },
     PORTIO_END_OF_LIST(),

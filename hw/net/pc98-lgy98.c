@@ -6,13 +6,13 @@
  * The LGY-98 (Melco/Buffalo) is an NE2000-compatible (DP8390) C-bus
  * Ethernet card for the NEC PC-98 series.  Its register interface is the
  * same DP8390 + NE2000 ASIC found on PC/AT NE2000 clones, but the ports
- * are relocated into the PC-98 C-bus I/O map.  With base 0x10D0:
+ * are relocated into the PC-98 C-bus I/O map.  With base 0x00D0:
  *
- *   0x10D0-0x10DF (base+0x00..0x0f)  DP8390 register block (1-byte access)
- *   0x12D0        (base+0x200)       NE2000 ASIC data port (remote DMA,
+ *   0x00D0-0x00DF (base+0x00..0x0f)  DP8390 register block (1-byte access)
+ *   0x02D0        (base+0x200)       NE2000 ASIC data port (remote DMA,
  *                                    8- and 16-bit access)
- *   0x10E8        (base+0x18)        a read pulses the card reset
- *   0x13D0-0x13DF (base+0x300)       LGY-98 board-ID / "knock" ports
+ *   0x00E8        (base+0x18)        a read pulses the card reset
+ *   0x03D0-0x03DF (base+0x300)       LGY-98 board-ID / "knock" ports
  *
  * This device reuses QEMU's shared NE2000 core (hw/net/ne2000.c)
  * unchanged: it builds the core's 0x20-byte I/O region with
@@ -22,9 +22,9 @@
  * above (the same "shared core + PC-98 port-mapping wrapper" scheme
  * used by hw/ide/pc98-ide.c and hw/display/pc98-wab.c), so the shared
  * NE2000 model stays untouched.  The board-ID ports at base+0x300 are
- * not part of the NE2000 core; they are stubbed here (reads return
- * 0xff, writes ignored), which is enough for the NE2000
- * register-level probe used by common drivers.
+ * not part of the NE2000 core.  Their fixed identification bytes are
+ * provided here; configuration-sequence writes are accepted and ignored
+ * because this built-in card has a fixed I/O base and interrupt.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -53,11 +53,11 @@
 #include "ne2000.h"
 
 /* LGY-98 C-bus base address (fixed for the built-in card). */
-#define LGY98_IOBASE        0x10d0
+#define LGY98_IOBASE        0x00d0
 #define LGY98_REG_OFFSET    0x000   /* DP8390 register block   -> core 0x00 */
 #define LGY98_ASIC_OFFSET   0x200   /* NE2000 ASIC data port   -> core 0x10 */
 #define LGY98_RESET_OFFSET  0x018   /* reset pulse (read)      -> core 0x1f */
-#define LGY98_BOARD_OFFSET  0x300   /* LGY-98 board-ID ports (stub)         */
+#define LGY98_BOARD_OFFSET  0x300   /* LGY-98 board-ID ports                */
 
 OBJECT_DECLARE_SIMPLE_TYPE(Pc98Lgy98State, PC98_LGY98)
 
@@ -67,22 +67,33 @@ struct Pc98Lgy98State {
     NE2000State ne2000;
     qemu_irq irq;
 
-    MemoryRegion reg_alias;     /* 0x10D0-0x10DF -> core io 0x00 (16 bytes) */
-    MemoryRegion asic_alias;    /* 0x12D0        -> core io 0x10 (2 bytes)  */
-    MemoryRegion reset_alias;   /* 0x10E8        -> core io 0x1f (1 byte)   */
-    PortioList board_portio;    /* 0x13D0-0x13DF board-ID stub              */
+    MemoryRegion reg_alias;     /* 0x00D0-0x00DF -> core io 0x00 (16 bytes) */
+    MemoryRegion asic_alias;    /* 0x02D0        -> core io 0x10 (2 bytes)  */
+    MemoryRegion reset_alias;   /* 0x00E8        -> core io 0x1f (1 byte)   */
+    PortioList board_portio;    /* 0x03D0-0x03DF board-ID ports             */
 };
 
 /*
  * LGY-98 board-ID / "knock" ports at base+0x300.  The real card
- * exposes a small identification sequence here; the NE2000
- * register-level probe does not need it, so reads float high (0xff)
- * and writes are ignored.  Implement the real sequence here only if a
- * guest's detection depends on it.
+ * exposes a serial configuration sequence as well as these fixed ID
+ * bytes.  They are sufficient for software to identify the board;
+ * writes can be ignored while the built-in board remains fixed at
+ * 0x00d0/IRQ6.
  */
 static uint32_t lgy98_board_read(void *opaque, uint32_t addr)
 {
-    return 0xff;
+    switch (addr & 0x0f) {
+    case 0x0a:
+        return 0x00;
+    case 0x0b:
+        return 0x40;
+    case 0x0c:
+        return 0x26;
+    case 0x0d:
+        return 0x0b;
+    default:
+        return 0xff;
+    }
 }
 
 static void lgy98_board_write(void *opaque, uint32_t addr, uint32_t val)

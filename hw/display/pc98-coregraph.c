@@ -136,9 +136,18 @@ static void coregraph_apply_mappings(Pc98CoreGraphState *s)
      * framebuffer at 0x00A00000 - the PC-9821 window-accelerator region.
      */
     isa_page = c->vga.sr[0x07] & 0xf0 & ~((c->vga.gr[0x0b] >> 1) & 0x10);
-    if (isa_page) {
+    /*
+     * Only the PC-9821 window-accelerator page is wired through Core-Graph.
+     * Generic Cirrus also uses SR07 values such as 11h merely to enable
+     * extended modes.  Treating every non-zero high nibble as an ISA decode
+     * maps VRAM over ordinary RAM at 1 MiB; a DOS extender then loses the
+     * code it is executing as soon as it writes SR07=11h.
+     */
+    if (isa_page == 0xa0) {
         isa_base = (hwaddr)isa_page << 16;
         isa_size = (c->vga.gr[0x0b] & 0x20) ? 2 * MiB : 1 * MiB;
+    } else {
+        isa_page = 0;
     }
 
     /*
