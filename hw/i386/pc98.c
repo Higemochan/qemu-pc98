@@ -69,16 +69,16 @@
  *   IRQ 0  PIT
  *   IRQ 1  keyboard
  *   IRQ 2  display vsync
- *   IRQ 3  FM sound
+ *   IRQ 3  WSS / Mate-X PCM (compatibility BIOS assignment)
  *   IRQ 4  RS-232C
- *   IRQ 5  network #2
+ *   IRQ 5  PC-9801-92 SCSI; PCI INTx placeholder on pc9821
  *   IRQ 6  network #1
  *   IRQ 7  cascade from the slave PIC  (the PC/AT wires this on IRQ2)
  *   IRQ 8  x87 error (FERR)
  *   IRQ 9  built-in IDE
  *   IRQ10  floppy, 640 KB interface
  *   IRQ11  floppy, 1 MB interface
- *   IRQ12  Mate-X PCM (CS4231A)
+ *   IRQ12  PC-9801-86 FM sound (alternate setting)
  *   IRQ13  bus mouse
  *   IRQ15  calendar clock (uPD4990A)
  *

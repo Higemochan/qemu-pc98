@@ -1,6 +1,6 @@
 /*
  * NEC PC-9801/PC-9821 built-in RS-232C interface
- * Copyright (C) 2026 Awe Morris
+ * Copyright (c) 2026 Awe Morris
  *
  * The interface is a uPD8251-compatible USART at I/O ports 0x30/0x32,
  * clocked by PC-98 PIT channel 2 and connected to IRQ 4.

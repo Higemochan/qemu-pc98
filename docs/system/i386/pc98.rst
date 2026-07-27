@@ -110,7 +110,7 @@ Two sound devices are modelled:
 
 * The **PC-9801-86** FM sound board: a Yamaha YM2608 (OPNA) with an integrated
   YM2149-compatible SSG, reachable through I/O ports ``0x188``-``0x18E``, with
-  the FM timer interrupt on PC-98 IRQ 3.  Software detects it through the sound
+  the FM timer interrupt on PC-98 IRQ 12.  Software detects it through the sound
   ID register at ``0xA460`` (the board reports ``0x40``).  The 8 KiB internal
   rhythm ADPCM-A ROM is not built in; to enable the rhythm generator, place an
   8192-byte dump named ``2608_rhythm.rom`` on the firmware search path
@@ -119,10 +119,13 @@ Two sound devices are modelled:
   from the emu2149 core.
 
 * The built-in **Windows Sound System** (Mate-X PCM), a Crystal CS4231A codec
-  mapped at ``0x0F40`` on IRQ 12 / DMA 1, shared with QEMU's ``cs4231a`` model.
+  mapped at ``0x0F40``, shared with QEMU's ``cs4231a`` model.  Its power-on
+  route is IRQ 12 / DMA 1; the compatibility BIOS programs IRQ 3 / DMA 1
+  during POST so it does not conflict with OPNA.
 
-Both are created automatically by the machine; no ``-device`` option is
-needed.  Audio is emitted through the usual QEMU ``-audiodev`` backend.
+Both are optional and are created with ``-device pc98-opna`` and
+``-device pc98-wss`` respectively.  Audio is emitted through the usual QEMU
+``-audiodev`` backend.
 
 Limitations
 -----------

@@ -531,10 +531,10 @@ post_delay_done:
 	iret
 
 /*
- * Match the Xa7C9W power-on WSS state.  The firmware selects IRQ3 but
- * deliberately leaves the DMA field invalid; a non-PnP DOS driver can then
- * retain IRQ3 and choose DMA1 by changing 08h to 0Ah.  The latch remains
- * writable, so Windows can still assign PnP resources.
+ * Select IRQ3/DMA1 for the built-in WSS.  OPNA uses its alternate IRQ12
+ * setting, so programming both fields here avoids leaving the two sound
+ * devices on IRQ12 until a guest driver reconfigures the WSS.  The latch
+ * remains writable, so Windows can still assign PnP resources.
  *
  * Initialising only that latch is insufficient.  The NEC POST also puts
  * the CS4231 into mode 2, disables playback/capture, and establishes its
@@ -549,7 +549,7 @@ wss_init:
 	pushw	%dx
 	pushw	%si
 	movw	$WSS_CONFIG, %dx
-	movb	$0x08, %al
+	movb	$0x0a, %al
 	outb	%al, %dx
 
 	/* Wait for codec initialisation-in-progress to clear. */

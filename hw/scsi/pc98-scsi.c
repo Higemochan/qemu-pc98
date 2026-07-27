@@ -964,7 +964,7 @@ static void pc98_scsi_unrealize(DeviceState *dev)
 static const Property pc98_scsi_properties[] = {
     DEFINE_PROP_STRING("romfile", Pc98ScsiState, romfile),
     DEFINE_PROP_BOOL("bios-boot", Pc98ScsiState, bios_boot, true),
-    DEFINE_PROP_UINT32("irq", Pc98ScsiState, irq_num, 9),
+    DEFINE_PROP_UINT32("irq", Pc98ScsiState, irq_num, 5),
 };
 
 static void pc98_scsi_initfn(Object *obj)
