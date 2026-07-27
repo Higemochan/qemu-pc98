@@ -773,10 +773,15 @@ static void coregraph_update_display(Pc98CoreGraphState *s)
         qemu_graphic_console_set_hwops(s->cirrus.vga.con,
                                        &coregraph_hw_ops, s);
         qemu_console_hw_invalidate(s->cirrus.vga.con);
-        qemu_console_hw_update(s->cirrus.vga.con);
     } else {
         pc98_vga_select_console(s->primary_vga);
     }
+    /*
+     * Do not update synchronously from this guest I/O callback.  A mode
+     * switch may resize the console, and the Windows SDL backend must resize
+     * its host window on the UI thread.  Let the normal display refresh run
+     * the newly selected producer there.
+     */
 }
 
 static void coregraph_init_io_alias(MemoryRegion *alias, Object *owner,

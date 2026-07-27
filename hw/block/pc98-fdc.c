@@ -253,7 +253,11 @@ static void floppy_bus_create(FDCtrl *fdc, FloppyBus *bus, DeviceState *dev)
  * with collisions.
  */
 static const FDFormat pc98_fd_formats[] = {
-    /* NEC PC-98 2HD (1.23 MB, 1024-byte sectors) */
+    /*
+     * NEC PC-98 2HD (1.23 MB, 1024-byte sectors).  Later PC-9821 machines
+     * use 3-mode 3.5-inch drives, while older machines use 5.25-inch drives.
+     */
+    { FLOPPY_DRIVE_TYPE_144, 8, 77, 1, FDRIVE_RATE_500K, 1024, },
     { FLOPPY_DRIVE_TYPE_120, 8, 77, 1, FDRIVE_RATE_500K, 1024, },
     /* NEC PC-98 2DD (640 KB) */
     { FLOPPY_DRIVE_TYPE_120, 8, 80, 1, FDRIVE_RATE_250K, },
@@ -2125,8 +2129,10 @@ static void fdctrl_handle_save(FDCtrl *fdctrl, int direction)
 
 static void fdctrl_handle_readid(FDCtrl *fdctrl, int direction)
 {
-    FDrive *cur_drv = get_cur_drv(fdctrl);
+    FDrive *cur_drv;
 
+    SET_CUR_DRV(fdctrl, fdctrl->fifo[1] & FD_DOR_SELMASK);
+    cur_drv = get_cur_drv(fdctrl);
     cur_drv->head = (fdctrl->fifo[1] >> 2) & 1;
     timer_mod(fdctrl->result_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
              (NANOSECONDS_PER_SECOND / 50));
@@ -2727,7 +2733,7 @@ static uint32_t pc98_fdc_read_port(void *opaque, uint32_t reg)
     Pc98FdcState *isa = opaque;
     FDCtrl *fdctrl = &isa->state;
     uint32_t value = 0xff;
-    int drvsel;
+    int drvsel, i;
 
     switch (reg) {
     case 0x90:
@@ -2741,8 +2747,22 @@ static uint32_t pc98_fdc_read_port(void *opaque, uint32_t reg)
     case 0x94:
     case 0xcc:
         value = FDSTAT_TYPE0 | FDSTAT_INT0;
-        if (fdctrl->drives[0].blk && blk_is_inserted(fdctrl->drives[0].blk)) {
+        if (isa->force_ready) {
             value |= FDSTAT_READY;
+        } else {
+            /*
+             * The interface READY bit is sampled before a uPD765 command
+             * selects its unit.  It is therefore a shared interface signal,
+             * not the readiness of fdctrl's previous command unit.
+             */
+            for (i = 0; i < MAX_FD; i++) {
+                FDrive *drive = get_drv(fdctrl, i);
+
+                if (drive && drive->blk && blk_is_inserted(drive->blk)) {
+                    value |= FDSTAT_READY;
+                    break;
+                }
+            }
         }
         break;
     case 0xbe:

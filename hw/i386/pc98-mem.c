@@ -800,16 +800,26 @@ static bool mem_load_firmware(Pc98MemState *s, uint8_t *buf)
             found |= (1 << i);
         }
     }
-    if (read_rom_image(ROM_PCI_FILE, buf + OFF_PCI, ROM_PCI_BYTES)) {
+    /*
+     * A complete bank dump is one coherent firmware set.  Do not overwrite
+     * parts of it with split ROMs found later on another QEMU data path (for
+     * example the bundled free BIOS after -L points at a machine dump).
+     * Split images only fill regions for which no bank image was found.
+     */
+    if (!(found & (1 << BANK_PCI)) &&
+        read_rom_image(ROM_PCI_FILE, buf + OFF_PCI, ROM_PCI_BYTES)) {
         found |= (1 << BANK_PCI);
     }
-    if (read_rom_image(ROM_IDE_FILE, buf + OFF_IDE, ROM_IDE_BYTES)) {
+    if (!(found & (1 << BANK_IDE)) &&
+        read_rom_image(ROM_IDE_FILE, buf + OFF_IDE, ROM_IDE_BYTES)) {
         found |= (1 << BANK_IDE);
     }
-    if (read_rom_image(ROM_ITF_FILE, buf + OFF_ITF, ROM_ITF_BYTES)) {
+    if (!(found & (1 << BANK_ITF)) &&
+        read_rom_image(ROM_ITF_FILE, buf + OFF_ITF, ROM_ITF_BYTES)) {
         found |= (1 << BANK_ITF);
     }
-    if (read_rom_image(ROM_BIOS_FILE, buf + OFF_BIOS, ROM_BIOS_BYTES)) {
+    if ((found & (7 << BANK_BIOS)) != (7 << BANK_BIOS) &&
+        read_rom_image(ROM_BIOS_FILE, buf + OFF_BIOS, ROM_BIOS_BYTES)) {
         found |= (7 << BANK_BIOS);
     }
 

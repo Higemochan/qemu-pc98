@@ -4639,7 +4639,10 @@ void pc98_vga_select_console(Pc98VgaState *opaque)
 
     qemu_graphic_console_set_hwops(s->con, &pc98_vga_gfx_ops, s);
     qemu_console_hw_invalidate(s->con);
-    qemu_console_hw_update(s->con);
+    /*
+     * The next UI refresh performs the update.  Calling it here can resize
+     * an SDL window from a vCPU I/O callback, which deadlocks on Windows.
+     */
 }
 
 /* font (based on Neko Project 2) */
