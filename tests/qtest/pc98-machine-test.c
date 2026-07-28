@@ -47,6 +47,27 @@
 #define PC98_PCM_DATA_PORT    0xa46c
 #define PC98_SLAVE_PIC_CMD    0x0008
 
+#define PCI_CONFIG_ADDRESS    0x0cf8
+#define PCI_CONFIG_DATA       0x0cfc
+#define PCI_COMMAND           0x04
+#define PCI_BASE_ADDRESS_0    0x10
+#define PCI_BASE_ADDRESS_4    0x20
+#define PCI_INTERRUPT_LINE    0x3c
+#define PCI_COMMAND_IO        0x0001
+#define PCI_COMMAND_MEMORY    0x0002
+#define PCI_COMMAND_MASTER    0x0004
+
+#define PC98_UHCI_DEVFN       (8 << 3)
+#define PC98_EHCI_DEVFN       (13 << 3)
+#define PC98_PCI_IRQ          14
+#define PC98_UHCI_IO_BASE     0x6000
+#define PC98_EHCI_MMIO_BASE   0xf1000000
+#define EHCI_CAPLENGTH        0x20
+#define EHCI_USBSTS           0x04
+#define EHCI_USBINTR          0x08
+#define EHCI_PORTSC1          0x44
+#define EHCI_STS_PCD          0x04
+
 #define FDC_MSR_DRV0_BUSY  0x01
 #define FDC_MSR_CMD_BUSY   0x10
 #define FDC_MSR_DIO        0x40
@@ -87,6 +108,97 @@ static void test_pc9821_has_pci_coregraph(void)
 
     g_assert_nonnull(strstr(qtree, "dev: pc98-pcihost"));
     g_assert_nonnull(strstr(qtree, "dev: pc98-coregraph"));
+}
+
+static uint32_t pc98_pci_config_address(uint8_t devfn, uint8_t reg)
+{
+    return 0x80000000U | ((uint32_t)devfn << 8) | (reg & ~3);
+}
+
+static uint32_t pc98_pci_readl(QTestState *qts, uint8_t devfn, uint8_t reg)
+{
+    qtest_outl(qts, PCI_CONFIG_ADDRESS,
+               pc98_pci_config_address(devfn, reg));
+    return qtest_inl(qts, PCI_CONFIG_DATA);
+}
+
+static void pc98_pci_writel(QTestState *qts, uint8_t devfn, uint8_t reg,
+                            uint32_t value)
+{
+    qtest_outl(qts, PCI_CONFIG_ADDRESS,
+               pc98_pci_config_address(devfn, reg));
+    qtest_outl(qts, PCI_CONFIG_DATA, value);
+}
+
+static void test_pc9821_usb_pci_io_mmio_irq(void)
+{
+    QTestState *qts;
+    uint32_t status;
+
+    qts = qtest_init(
+        "-machine pc9821 -usb -nodefaults -display none "
+        "-device usb-tablet,bus=usb11.0 "
+        "-drive id=usbdrive,if=none,file=null-co://,format=raw");
+
+    g_assert_cmphex(pc98_pci_readl(qts, PC98_UHCI_DEVFN, 0), ==,
+                    0x70208086);
+    g_assert_cmphex(pc98_pci_readl(qts, PC98_EHCI_DEVFN, 0), ==,
+                    0x24cd8086);
+
+    /* Replay the fixed assignments made by the compatibility ITF. */
+    pc98_pci_writel(qts, PC98_UHCI_DEVFN, PCI_BASE_ADDRESS_4,
+                    PC98_UHCI_IO_BASE | 1);
+    pc98_pci_writel(qts, PC98_UHCI_DEVFN, PCI_COMMAND,
+                    PCI_COMMAND_IO | PCI_COMMAND_MASTER);
+    pc98_pci_writel(qts, PC98_UHCI_DEVFN, PCI_INTERRUPT_LINE,
+                    PC98_PCI_IRQ);
+
+    pc98_pci_writel(qts, PC98_EHCI_DEVFN, PCI_BASE_ADDRESS_0,
+                    PC98_EHCI_MMIO_BASE);
+    pc98_pci_writel(qts, PC98_EHCI_DEVFN, PCI_COMMAND,
+                    PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+    pc98_pci_writel(qts, PC98_EHCI_DEVFN, PCI_INTERRUPT_LINE,
+                    PC98_PCI_IRQ);
+
+    g_assert_cmphex(pc98_pci_readl(qts, PC98_UHCI_DEVFN,
+                                   PCI_BASE_ADDRESS_4) & ~0x1f, ==,
+                    PC98_UHCI_IO_BASE);
+    g_assert_cmphex(pc98_pci_readl(qts, PC98_EHCI_DEVFN,
+                                   PCI_BASE_ADDRESS_0) & ~0xfff, ==,
+                    PC98_EHCI_MMIO_BASE);
+    g_assert_cmphex(pc98_pci_readl(qts, PC98_UHCI_DEVFN,
+                                   PCI_INTERRUPT_LINE) & 0xff, ==,
+                    PC98_PCI_IRQ);
+    g_assert_cmphex(pc98_pci_readl(qts, PC98_EHCI_DEVFN,
+                                   PCI_INTERRUPT_LINE) & 0xff, ==,
+                    PC98_PCI_IRQ);
+
+    /* UHCI is exposed through PCI I/O and sees the full-speed tablet. */
+    g_assert_cmphex(qtest_inw(qts, PC98_UHCI_IO_BASE + 0x10) & 1, ==, 1);
+
+    /* EHCI is CPU-visible MMIO and sees the high-speed storage device. */
+    g_assert_cmphex(qtest_readb(qts, PC98_EHCI_MMIO_BASE), ==,
+                    EHCI_CAPLENGTH);
+    g_assert_cmphex(qtest_readw(qts, PC98_EHCI_MMIO_BASE + 2), ==, 0x0100);
+
+    /*
+     * Enable port-change IRQ before hotplug.  Connecting high-speed storage
+     * must then reach slave PIC IR6, the PC-98 IRQ14 input.  This also
+     * exercises PCI INTx pin-D routing.
+     */
+    qtest_writel(qts, PC98_EHCI_MMIO_BASE + EHCI_CAPLENGTH + EHCI_USBINTR,
+                 EHCI_STS_PCD);
+    qtest_qmp_device_add(qts, "usb-storage", "usbdev0",
+                         "{'bus':'usb20.0','drive':'usbdrive'}");
+    g_assert_cmphex(qtest_readl(qts, PC98_EHCI_MMIO_BASE + EHCI_CAPLENGTH +
+                                EHCI_PORTSC1) & 1, ==, 1);
+    status = qtest_readl(qts, PC98_EHCI_MMIO_BASE + EHCI_CAPLENGTH +
+                         EHCI_USBSTS);
+    g_assert_cmphex(status & EHCI_STS_PCD, ==, EHCI_STS_PCD);
+    qtest_outb(qts, PC98_SLAVE_PIC_CMD, 0x0a);
+    g_assert_cmphex(qtest_inb(qts, PC98_SLAVE_PIC_CMD) & 0x40, ==, 0x40);
+
+    qtest_quit(qts);
 }
 
 static void test_pc98_lgy98_port_map(void)
@@ -403,6 +515,8 @@ int main(int argc, char **argv)
                    test_pc9801_has_no_pci);
     qtest_add_func("/pc98/pc9821/pci-coregraph",
                    test_pc9821_has_pci_coregraph);
+    qtest_add_func("/pc98/pc9821/usb-pci-io-mmio-irq",
+                   test_pc9821_usb_pci_io_mmio_irq);
     qtest_add_func("/pc98/lgy98/port-map",
                    test_pc98_lgy98_port_map);
     qtest_add_func("/pc98/fdc/empty-read-id",

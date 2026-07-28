@@ -22,7 +22,7 @@
 	.equ	PCI_SET_FAILED,		0x88
 	.equ	PCI_BUFFER_TOO_SMALL,	0x89
 
-	.equ	PCI_IRQ,		5
+	.equ	PCI_IRQ,		14
 	.equ	PCI_IRQ_MASK,		(1 << PCI_IRQ)
 	.equ	IRQ_TABLE_SIZE,		(irq_table_end - irq_table)
 
@@ -59,12 +59,11 @@ _start:
 
 	/*
 	 * +21: private POST helper.  The Xa7 ROM temporarily uses segment 4000h
-	 * as scratch space here and clears it before returning.  The stock main
-	 * BIOS accepts a declined entry, so no persistent service is needed.
+	 * as scratch space here and clears it before returning.  Configure the
+	 * optional QEMU UHCI/EHCI functions before the operating system starts.
 	 */
-	lret
-	nop
-	nop
+	.byte	0xe9
+	.word	pci_post_config - . - 2
 
 	/* +24 and +27 */
 	lret
@@ -81,6 +80,74 @@ _start:
 	nop
 	nop
 	.byte	0x00, 0x00
+	lret
+
+	.org	0x0100
+pci_post_config:
+	pushl	%eax
+	pushl	%ebx
+	pushl	%edx
+
+	/* 00:08.0, Intel 82371SB UHCI: I/O 6000h, bus master, IRQ 14. */
+	movw	$PCI_ADDR, %dx
+	movl	$0x80004000, %eax
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	inl	%dx, %eax
+	cmpl	$0x70208086, %eax
+	jne	1f
+	movw	$PCI_ADDR, %dx
+	movl	$0x80004020, %eax
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	movl	$0x00006001, %eax
+	outl	%eax, %dx
+	movw	$PCI_ADDR, %dx
+	movl	$0x80004004, %eax
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	movw	$0x0005, %ax		/* I/O space and bus master */
+	outw	%ax, %dx
+	movw	$PCI_ADDR, %dx
+	movl	$0x8000403c, %eax
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	movb	$PCI_IRQ, %al
+	outb	%al, %dx
+1:
+	/* 00:0d.0, Intel 82801D EHCI: MMIO F1000000h, master, IRQ 14. */
+	movw	$PCI_ADDR, %dx
+	movl	$0x80006800, %eax
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	inl	%dx, %eax
+	cmpl	$0x24cd8086, %eax
+	jne	2f
+	movw	$PCI_ADDR, %dx
+	movl	$0x80006810, %eax
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	movl	$0xf1000000, %eax
+	outl	%eax, %dx
+	movw	$PCI_ADDR, %dx
+	movl	$0x80006804, %eax
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	movw	$0x0006, %ax		/* memory space and bus master */
+	outw	%ax, %dx
+	movw	$PCI_ADDR, %dx
+	movl	$0x8000683c, %eax
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	movb	$PCI_IRQ, %al
+	outb	%al, %dx
+2:
+	movw	$PCI_ADDR, %dx
+	xorl	%eax, %eax
+	outl	%eax, %dx
+	popl	%edx
+	popl	%ebx
+	popl	%eax
 	lret
 
 	/* Published signature retained at the same bank offset as the Xa7 ROM. */
@@ -313,7 +380,7 @@ pci_write_dword:
  * PCI BIOS B10Eh.  The 16-bit interface points ES:DI at:
  *     word buffer_size; dword buffer_far_pointer
  * The Xa7 exposes three 16-byte routes for its onboard/physical slots.
- * This machine wires every PCI INTx pin to PC-98 IRQ 5, so advertise that
+ * This machine wires every PCI INTx pin to PC-98 IRQ 14, so advertise that
  * fixed route instead of the mutable routing registers used by real boards.
  */
 pci_get_irq_routing:
@@ -341,7 +408,7 @@ pci_get_irq_routing:
 
 /*
  * PCI BIOS B10Fh.  QEMU's PC-9821 host bridge has a fixed INTx route, so a
- * request succeeds only for IRQ 5.  Also mirror it to Interrupt Line (3Ch)
+ * request succeeds only for IRQ 14.  Also mirror it to Interrupt Line (3Ch)
  * for software that subsequently reads configuration space.
  */
 pci_set_irq:

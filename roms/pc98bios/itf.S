@@ -591,6 +591,18 @@ pci_table:
 	.long	0x80000078, 0x00010000
 	.long	0x80003064, 0x18073f10
 	.long	0x80000054, 0x00000330
+	/*
+	 * Optional QEMU USB controllers.  Writes to absent devices are ignored.
+	 * UHCI (00:08.0) uses I/O 6000h; EHCI (00:0d.0) uses MMIO F1000000h.
+	 * F0000000h is reserved for the Core-Graph linear framebuffer.
+	 * Both share the fixed PCI interrupt route, IRQ 14.
+	 */
+	.long	0x80004020, 0x00006001
+	.long	0x80004004, 0x00000005
+	.long	0x8000403c, 0x0000000e
+	.long	0x80006810, 0xf1000000
+	.long	0x80006804, 0x00000006
+	.long	0x8000683c, 0x0000000e
 pci_table_end:
 
 /*

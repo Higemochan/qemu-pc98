@@ -189,19 +189,13 @@ static const TypeInfo pc98_cbus_bridge_info = {
 struct Pc98PciHostState {
     PCIHostState parent_obj;
 
-    MemoryRegion pci_mem;   /* PCI MMIO address space (no BAR users yet) */
-    qemu_irq intx[PCI_NUM_PINS];
+    qemu_irq irq_out;
+    uint8_t intx_level;
 };
 
 OBJECT_DECLARE_SIMPLE_TYPE(Pc98PciHostState, PC98_PCI_HOST)
 
-/*
- * INTx routing.  No built-in PCI function asserts an interrupt in the
- * current configuration, so this is a placeholder: all four PCI
- * interrupt pins are collapsed onto a single host output line that the
- * machine wires to a free PC-98 IRQ.  Real PC-9821 routing tables will
- * replace this when an interrupt-driven PCI device is added.
- */
+/* All PCI INTx pins share the PC-9821's fixed IRQ 14 route. */
 static int pc98_pci_map_irq(PCIDevice *pci_dev, int pin)
 {
     return pin;
@@ -209,9 +203,26 @@ static int pc98_pci_map_irq(PCIDevice *pci_dev, int pin)
 
 static void pc98_pci_set_irq(void *opaque, int irq_num, int level)
 {
-    qemu_irq *pins = opaque;
+    Pc98PciHostState *s = opaque;
+    uint8_t old_level = s->intx_level;
 
-    qemu_set_irq(pins[irq_num], level);
+    assert(irq_num < PCI_NUM_PINS);
+    if (level) {
+        s->intx_level |= BIT(irq_num);
+    } else {
+        s->intx_level &= ~BIT(irq_num);
+    }
+    if (!!old_level != !!s->intx_level) {
+        qemu_set_irq(s->irq_out, !!s->intx_level);
+    }
+}
+
+static PCIINTxRoute pc98_pci_route_irq(void *opaque, int pin)
+{
+    return (PCIINTxRoute) {
+        .mode = PCI_INTX_ENABLED,
+        .irq = 14,
+    };
 }
 
 /*
@@ -283,11 +294,8 @@ static void pc98_pcihost_realize(DeviceState *dev, Error **errp)
     PCIHostState *phb = PCI_HOST_BRIDGE(dev);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     PCIBus *b;
-    int i;
 
-    for (i = 0; i < PCI_NUM_PINS; i++) {
-        sysbus_init_irq(sbd, &s->intx[i]);
-    }
+    sysbus_init_irq(sbd, &s->irq_out);
 
     /* CONFIG_ADDRESS (0xCF8, dword) and CONFIG_DATA (0xCFC) */
     memory_region_init_io(&phb->conf_mem, OBJECT(dev), &pci_host_conf_le_ops,
@@ -299,13 +307,17 @@ static void pc98_pcihost_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_io(), 0xcfc, &phb->data_mem);
     sysbus_init_ioports(sbd, 0xcfc, 4);
 
-    /* PCI MMIO space.  Standalone for now: no built-in function has a BAR. */
-    memory_region_init(&s->pci_mem, OBJECT(dev), "pc98-pci-mem", UINT64_MAX);
-
+    /*
+     * PC-9821 PCI memory and bus-master addresses are identity mapped into
+     * the CPU physical address space.  Passing system memory directly lets
+     * PCI BARs become CPU-visible MMIO and lets UHCI/EHCI DMA reach guest
+     * RAM.
+     */
     b = pci_register_root_bus(dev, "pci.0", pc98_pci_set_irq,
-                              pc98_pci_map_irq, s->intx,
-                              &s->pci_mem, get_system_io(),
+                              pc98_pci_map_irq, s,
+                              get_system_memory(), get_system_io(),
                               0, PCI_NUM_PINS, TYPE_PCI_BUS);
+    pci_bus_set_route_irq_fn(b, pc98_pci_route_irq);
     phb->bus = b;
 
     /* device 0: host bridge / PMC */

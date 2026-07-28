@@ -72,7 +72,7 @@
  *   IRQ 2  display vsync
  *   IRQ 3  WSS / Mate-X PCM (compatibility BIOS assignment)
  *   IRQ 4  RS-232C
- *   IRQ 5  PC-9801-92 SCSI; PCI INTx placeholder on pc9821
+ *   IRQ 5  PC-9801-92 SCSI
  *   IRQ 6  network #1
  *   IRQ 7  cascade from the slave PIC  (the PC/AT wires this on IRQ2)
  *   IRQ 8  x87 error (FERR)
@@ -81,6 +81,7 @@
  *   IRQ11  floppy, 1 MB interface
  *   IRQ12  PC-9801-86 FM sound (alternate setting)
  *   IRQ13  bus mouse
+ *   IRQ14  PCI INTx on pc9821
  *   IRQ15  calendar clock (uPD4990A)
  *
  * DMA:
@@ -115,6 +116,7 @@ struct Pc98MachineClass {
 #define TYPE_PC98_MACHINE   MACHINE_TYPE_NAME("pc98")
 #define TYPE_PC9801_MACHINE MACHINE_TYPE_NAME("pc9801")
 #define TYPE_PC9821_MACHINE MACHINE_TYPE_NAME("pc9821")
+#define PC98_PCI_IRQ 14
 OBJECT_DECLARE_TYPE(Pc98MachineState, Pc98MachineClass, PC98_MACHINE)
 
 /*
@@ -424,19 +426,18 @@ static void pc98_devices_init(Pc98MachineState *pms)
     }
 
     /*
-     * PCI host bridge (pc98-pci only).  PC-98 uses Configuration
-     * Mechanism #1 at the PC/AT ports 0xCF8/0xCFC.  The four PCI
-     * interrupt pins are routed to a single free IRQ for now; no
-     * built-in PCI function raises an interrupt yet.
+     * PCI host bridge.  PC-98 uses Configuration Mechanism #1 at the PC/AT
+     * ports 0xCF8/0xCFC.  All four PCI interrupt pins are level-ORed onto
+     * the fixed IRQ14 route advertised by the compatibility PCI BIOS.
      */
     if (pmc->has_pci) {
         DeviceState *host = qdev_new(TYPE_PC98_PCI_HOST);
         SysBusDevice *sbd = SYS_BUS_DEVICE(host);
+        PCIBus *pci_bus;
 
         sysbus_realize_and_unref(sbd, &error_fatal);
-        for (i = 0; i < 4; i++) {
-            sysbus_connect_irq(sbd, i, x86ms->gsi[5]);
-        }
+        sysbus_connect_irq(sbd, 0, x86ms->gsi[PC98_PCI_IRQ]);
+        pci_bus = pc98_pci_get_bus(host);
         /* wire dev0 config reg 0x64 (D000 window shadow) to the mem controller */
         pc98_pci_set_d000_mem(pms->mem);
         if (pmc->has_coregraph) {
@@ -446,9 +447,28 @@ static void pc98_devices_init(Pc98MachineState *pms)
             /* Keep the shared GDC/Core-Graph console addressable by device. */
             DEVICE(coregraph)->id = g_strdup("coregraph");
             pc98_coregraph_set_primary_vga(coregraph, pms->vga);
-            pci_realize_and_unref(coregraph, pc98_pci_get_bus(host),
-                                  &error_fatal);
+            pci_realize_and_unref(coregraph, pci_bus, &error_fatal);
         }
+
+        /*
+         * -usb provides a Windows 2000-compatible USB 1.1/2.0 pair.  They
+         * remain optional so an ordinary PC-9821 does not gain hardware
+         * unless requested.  The compatibility firmware assigns fixed BARs
+         * before an OS starts and may later reallocate them.
+         */
+        if (machine_usb(machine)) {
+            PCIDevice *uhci = pci_new(PCI_DEVFN(8, 0), "piix3-usb-uhci");
+            PCIDevice *ehci = pci_new(PCI_DEVFN(13, 0), "usb-ehci");
+
+            DEVICE(uhci)->id = g_strdup("usb11");
+            pci_realize_and_unref(uhci, pci_bus, &error_fatal);
+
+            DEVICE(ehci)->id = g_strdup("usb20");
+            pci_realize_and_unref(ehci, pci_bus, &error_fatal);
+        }
+    } else if (machine_usb(machine)) {
+        error_report("pc9801 has no PCI bus for a USB host controller");
+        exit(1);
     }
 
     /* board ports: A20 gate, software reset, and firmware straps */
