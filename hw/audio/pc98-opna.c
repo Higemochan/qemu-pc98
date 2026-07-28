@@ -51,6 +51,7 @@
 #include "hw/core/loader.h"
 #include "hw/core/irq.h"
 #include "hw/audio/pc98-opna.h"
+#include "hw/audio/pc98-wss.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/isa/isa.h"
 #include "system/ioport.h"
@@ -585,6 +586,18 @@ static void pc98_opna_realize(DeviceState *dev, Error **errp)
     ISADevice *isadev = ISA_DEVICE(dev);
     Pc98OpnaState *s = PC98_OPNA(dev);
     struct audsettings as;
+    bool ambiguous = false;
+
+    /*
+     * The compatibility configurations route both PC-9801-86 and WSS to
+     * IRQ3.  They represent alternative sound configurations, not boards
+     * that may be installed together.
+     */
+    if (object_resolve_path_type("", TYPE_PC98_WSS, &ambiguous) ||
+        ambiguous) {
+        error_setg(errp, "pc98-opna and pc98-wss are mutually exclusive");
+        return;
+    }
 
     if (!audio_be_check(&s->audio_be, errp)) {
         return;
@@ -762,7 +775,7 @@ static const VMStateDescription vmstate_pc98_opna = {
 static const Property pc98_opna_properties[] = {
     DEFINE_AUDIO_PROPERTIES(Pc98OpnaState, audio_be),
     DEFINE_PROP_UINT32("freq", Pc98OpnaState, freq, 55466),
-    DEFINE_PROP_UINT32("irq", Pc98OpnaState, isairq, 12),
+    DEFINE_PROP_UINT32("irq", Pc98OpnaState, isairq, 3),
 };
 
 static void pc98_opna_class_init(ObjectClass *klass, const void *data)

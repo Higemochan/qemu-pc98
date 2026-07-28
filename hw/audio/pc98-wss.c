@@ -49,6 +49,7 @@
 #include "qemu/error-report.h"
 #include "qemu/audio.h"
 #include "hw/audio/cs4231a.h"
+#include "hw/audio/pc98-opna.h"
 #include "hw/audio/pc98-wss.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/isa/isa.h"
@@ -160,6 +161,18 @@ static void pc98_wss_realize(DeviceState *dev, Error **errp)
     ISABus *bus = isa_bus_from_device(isadev);
     ISADevice *codec;
     Error *local_err = NULL;
+    bool ambiguous = false;
+
+    /*
+     * The compatibility configurations route both WSS and PC-9801-86 to
+     * IRQ3.  Reject an ambiguous configuration instead of allowing their
+     * interrupt sources to collide.
+     */
+    if (object_resolve_path_type("", TYPE_PC98_OPNA, &ambiguous) ||
+        ambiguous) {
+        error_setg(errp, "pc98-wss and pc98-opna are mutually exclusive");
+        return;
+    }
 
     s->cfg = PC98_WSS_CFG_DEFAULT;
 
