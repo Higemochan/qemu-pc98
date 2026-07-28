@@ -40,11 +40,14 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/core/cpu.h"
+#include "hw/core/hotplug.h"
 #include "hw/core/irq.h"
 #include "hw/ide/ide-bus.h"
+#include "hw/ide/ide-dev.h"
 #include "hw/ide/pc98-ide.h"
 #include "hw/isa/isa.h"
 #include "migration/vmstate.h"
+#include "system/block-backend.h"
 #include "system/ioport.h"
 #include "qom/object.h"
 #include "ide-internal.h"
@@ -76,6 +79,8 @@ static void pc98_ide_trace(const char *tag, int reg, uint32_t val)
 #endif
 
 #define PC98_IDE_NBUS 2
+#define PC98_IDE_HEADS 8
+#define PC98_IDE_SECTORS 17
 
 struct Pc98IdeState {
     ISADevice parent_obj;
@@ -423,6 +428,51 @@ static const VMStateDescription vmstate_pc98_ide = {
     }
 };
 
+static void pc98_ide_pre_plug(HotplugHandler *hotplug_dev,
+                              DeviceState *dev, Error **errp)
+{
+    IDEDevice *ide;
+    int64_t bytes;
+    uint64_t sectors, cylinders;
+    uint32_t cyls;
+
+    if (!object_dynamic_cast(OBJECT(dev), "ide-hd")) {
+        return;
+    }
+
+    ide = IDE_DEVICE(dev);
+    if (ide->conf.cyls || ide->conf.heads || ide->conf.secs ||
+        !ide->conf.blk) {
+        return;
+    }
+
+    bytes = blk_getlength(ide->conf.blk);
+    if (bytes < 0) {
+        error_setg_errno(errp, -bytes,
+                         "Could not determine PC-98 IDE disk size");
+        return;
+    }
+
+    sectors = bytes / BDRV_SECTOR_SIZE;
+    cylinders = sectors / (PC98_IDE_HEADS * PC98_IDE_SECTORS);
+    if (cylinders < 1) {
+        cyls = 1;
+    } else if (cylinders > 65535) {
+        cyls = 65535;
+    } else {
+        cyls = cylinders;
+    }
+
+    /*
+     * Generic IDE otherwise advertises 16 heads and 63 sectors.  NEC DOS
+     * uses IDENTIFY geometry to interpret the PC-98 partition table, whose
+     * fixed-disk convention is 8 heads by 17 sectors.
+     */
+    ide->conf.cyls = cyls;
+    ide->conf.heads = PC98_IDE_HEADS;
+    ide->conf.secs = PC98_IDE_SECTORS;
+}
+
 static void pc98_ide_realize(DeviceState *dev, Error **errp)
 {
     ISADevice *isadev = ISA_DEVICE(dev);
@@ -432,6 +482,7 @@ static void pc98_ide_realize(DeviceState *dev, Error **errp)
     s->bus_irq = qemu_allocate_irqs(pc98_ide_irq, s, PC98_IDE_NBUS);
     for (b = 0; b < PC98_IDE_NBUS; b++) {
         ide_bus_init(&s->bus[b], sizeof(s->bus[b]), dev, b, 2);
+        qbus_set_hotplug_handler(BUS(&s->bus[b]), OBJECT(dev));
         ide_bus_init_output_irq(&s->bus[b], s->bus_irq[b]);
         ide_bus_register_restart_cb(&s->bus[b]);
     }
@@ -453,12 +504,14 @@ static void pc98_ide_finalize(Object *obj)
 static void pc98_ide_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    HotplugHandlerClass *hc = HOTPLUG_HANDLER_CLASS(klass);
 
     dc->realize = pc98_ide_realize;
     device_class_set_legacy_reset(dc, pc98_ide_reset);
     dc->vmsd = &vmstate_pc98_ide;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->user_creatable = false;
+    hc->pre_plug = pc98_ide_pre_plug;
 }
 
 static const TypeInfo pc98_ide_info = {
@@ -467,6 +520,10 @@ static const TypeInfo pc98_ide_info = {
     .instance_size = sizeof(Pc98IdeState),
     .instance_finalize = pc98_ide_finalize,
     .class_init    = pc98_ide_class_init,
+    .interfaces = (const InterfaceInfo[]) {
+        { TYPE_HOTPLUG_HANDLER },
+        { }
+    },
 };
 
 static void pc98_ide_register_types(void)
@@ -487,9 +544,6 @@ type_init(pc98_ide_register_types)
  * Disk images therefore must be partitioned for 8-head geometry (as the
  * real BIOS's own FORMAT would).
  */
-#define PC98_IDE_HEADS    8
-#define PC98_IDE_SECTORS  17
-
 static void pc98_ide_set_geometry(IDEState *ide)
 {
     int cyls;

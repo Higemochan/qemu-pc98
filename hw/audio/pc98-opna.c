@@ -54,6 +54,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/isa/isa.h"
 #include "system/ioport.h"
+#include "migration/vmstate.h"
 #include "qom/object.h"
 #include "trace.h"
 
@@ -108,6 +109,11 @@ struct Pc98OpnaState {
     uint8_t pcm_fifo;           /* 0xA468 FIFO control        */
     uint8_t pcm_dactrl;         /* 0xA46A data format         */
     bool active;
+    uint8_t addr_latch[2];
+    uint8_t reg_shadow[512];
+    uint8_t reg_valid[64];
+    uint8_t prescaler;
+    bool irq_level;
 
     /* Scratch mixing buffers. */
     int32_t fm_l[PC98_OPNA_CHUNK];
@@ -164,6 +170,7 @@ static void opna_irq_handler(void *param, uint8_t level)
 {
     Pc98OpnaState *s = param;
 
+    s->irq_level = !!level;
     trace_pc98_opna_irq(level);
     qemu_set_irq(s->irq, level ? 1 : 0);
 }
@@ -259,12 +266,25 @@ static void opna_write(void *opaque, uint32_t addr, uint32_t val)
 {
     Pc98OpnaState *s = opaque;
     int a = (addr - PC98_OPNA_IOBASE) >> 1;     /* 0x188/8A/8C/8E -> 0..3 */
+    unsigned bank = (a >> 1) & 1;
+    unsigned reg;
 
     if (!s->active) {
         s->active = true;
         audio_be_set_active_out(s->audio_be, s->voice, 1);
     }
-    ym2608_write(s->opna, a, val & 0xff);
+    val &= 0xff;
+    if (!(a & 1)) {
+        s->addr_latch[bank] = val;
+        if (!bank && val >= 0x2d && val <= 0x2f) {
+            s->prescaler = val;
+        }
+    } else {
+        reg = bank * 256 + s->addr_latch[bank];
+        s->reg_shadow[reg] = val;
+        s->reg_valid[reg >> 3] |= 1u << (reg & 7);
+    }
+    ym2608_write(s->opna, a, val);
 }
 
 static uint32_t opna_read(void *opaque, uint32_t addr)
@@ -473,8 +493,82 @@ static void pc98_opna_reset(DeviceState *dev)
     s->pcm_fifo = 0;
     s->pcm_dactrl = 0x32;
     s->active = false;
+    memset(s->addr_latch, 0, sizeof(s->addr_latch));
+    memset(s->reg_shadow, 0, sizeof(s->reg_shadow));
+    memset(s->reg_valid, 0, sizeof(s->reg_valid));
+    s->prescaler = 0xff;
+    s->irq_level = false;
     ym2608_reset_chip(s->opna);         /* also resets the SSG via callback */
 }
+
+/*
+ * The imported YM2608/PSG engines do not expose a VMState layout.  Preserve
+ * their architectural register files in the wrapper and rebuild the cores by
+ * replaying register writes after load.  This retains guest programming and
+ * timer deadlines without serializing host pointers or mixer scratch state.
+ */
+static int pc98_opna_post_load(void *opaque, int version_id)
+{
+    Pc98OpnaState *s = opaque;
+    uint8_t addr_latch[2] = { s->addr_latch[0], s->addr_latch[1] };
+    bool irq_level = s->irq_level;
+    bool pending[2];
+    uint64_t expires[2];
+    unsigned reg;
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        pending[i] = timer_pending(s->timer[i]);
+        expires[i] = timer_expire_time_ns(s->timer[i]);
+        timer_del(s->timer[i]);
+    }
+    ym2608_reset_chip(s->opna);
+    if (s->prescaler >= 0x2d && s->prescaler <= 0x2f) {
+        ym2608_write(s->opna, 0, s->prescaler);
+    }
+    for (reg = 0; reg < ARRAY_SIZE(s->reg_shadow); reg++) {
+        if (s->reg_valid[reg >> 3] & (1u << (reg & 7))) {
+            unsigned bank = reg >> 8;
+
+            ym2608_write(s->opna, bank ? 2 : 0, reg & 0xff);
+            ym2608_write(s->opna, bank ? 3 : 1, s->reg_shadow[reg]);
+        }
+    }
+    ym2608_write(s->opna, 0, addr_latch[0]);
+    ym2608_write(s->opna, 2, addr_latch[1]);
+    for (i = 0; i < 2; i++) {
+        if (pending[i]) {
+            timer_mod(s->timer[i], expires[i]);
+        } else {
+            timer_del(s->timer[i]);
+        }
+    }
+    s->irq_level = irq_level;
+    qemu_set_irq(s->irq, irq_level);
+    audio_be_set_active_out(s->audio_be, s->voice, s->active);
+    return 0;
+}
+
+static const VMStateDescription vmstate_pc98_opna = {
+    .name = "pc98-opna",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = pc98_opna_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(sound_id, Pc98OpnaState),
+        VMSTATE_UINT8(pcm_fifo, Pc98OpnaState),
+        VMSTATE_UINT8(pcm_dactrl, Pc98OpnaState),
+        VMSTATE_BOOL(active, Pc98OpnaState),
+        VMSTATE_UINT8_ARRAY(addr_latch, Pc98OpnaState, 2),
+        VMSTATE_UINT8_ARRAY(reg_shadow, Pc98OpnaState, 512),
+        VMSTATE_UINT8_ARRAY(reg_valid, Pc98OpnaState, 64),
+        VMSTATE_UINT8(prescaler, Pc98OpnaState),
+        VMSTATE_BOOL(irq_level, Pc98OpnaState),
+        VMSTATE_TIMER_PTR(timer[0], Pc98OpnaState),
+        VMSTATE_TIMER_PTR(timer[1], Pc98OpnaState),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static const Property pc98_opna_properties[] = {
     DEFINE_AUDIO_PROPERTIES(Pc98OpnaState, audio_be),
@@ -487,6 +581,7 @@ static void pc98_opna_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = pc98_opna_realize;
+    dc->vmsd = &vmstate_pc98_opna;
     device_class_set_legacy_reset(dc, pc98_opna_reset);
     device_class_set_props(dc, pc98_opna_properties);
     set_bit(DEVICE_CATEGORY_SOUND, dc->categories);

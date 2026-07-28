@@ -27,7 +27,9 @@
 #include "system/blockdev.h"
 #include "system/ioport.h"
 #include "system/memory.h"
+#include "system/system.h"
 #include "qemu/timer.h"
+#include "migration/vmstate.h"
 #include "trace.h"
 
 #define PC98_SCSI_IOBASE       0x0cc0
@@ -138,7 +140,7 @@ typedef struct Pc98ScsiState {
     unsigned cdb_len;
     uint8_t target_lun;
     uint8_t status_byte;
-    Pc98ScsiPhase phase;
+    uint32_t phase;              /* Pc98ScsiPhase */
     bool status_irq_unread;
     bool msg_irq_unread;
 
@@ -901,6 +903,133 @@ static void pc98_scsi_reset(DeviceState *dev)
     qemu_set_irq(s->irq, 0);
 }
 
+/*
+ * The generic SCSI layer migrates the attached targets.  This controller can
+ * safely migrate between commands and while presenting the final status or
+ * message byte.  An in-flight request owns backend buffers that cannot be
+ * represented by this register-level model, so fail the snapshot explicitly
+ * instead of silently restoring a half-completed command.
+ */
+static int pc98_scsi_pre_save(void *opaque)
+{
+    Pc98ScsiState *s = opaque;
+
+    if (s->req || s->async_buf || s->async_len ||
+        s->phase == PHASE_DATA_IN || s->phase == PHASE_DATA_OUT) {
+        return -EBUSY;
+    }
+    return 0;
+}
+
+static int pc98_scsi_post_load(void *opaque, int version_id)
+{
+    Pc98ScsiState *s = opaque;
+    bool irq_level;
+
+    if (s->cdb_pos > sizeof(s->cdb) || s->cdb_len > sizeof(s->cdb)) {
+        return -EINVAL;
+    }
+    s->req = NULL;
+    s->async_buf = NULL;
+    s->async_len = 0;
+    irq_level = (s->asr & ASR_INT) &&
+                (s->regs[BOARD_MEM_BANK] & 0x04) &&
+                !timer_pending(s->irq_timer);
+    qemu_set_irq(s->irq, irq_level);
+    return 0;
+}
+
+static const VMStateDescription vmstate_pc98_scsi = {
+    .name = "pc98-scsi",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = pc98_scsi_pre_save,
+    .post_load = pc98_scsi_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(regs, Pc98ScsiState, 0x80),
+        VMSTATE_UINT8(reg_index, Pc98ScsiState),
+        VMSTATE_UINT8(asr, Pc98ScsiState),
+        VMSTATE_UINT8(csr, Pc98ScsiState),
+        VMSTATE_UINT8(board_dma, Pc98ScsiState),
+        VMSTATE_UINT8_ARRAY(cdb, Pc98ScsiState, 16),
+        VMSTATE_UINT32(cdb_pos, Pc98ScsiState),
+        VMSTATE_UINT32(cdb_len, Pc98ScsiState),
+        VMSTATE_UINT8(target_lun, Pc98ScsiState),
+        VMSTATE_UINT8(status_byte, Pc98ScsiState),
+        VMSTATE_UINT32(phase, Pc98ScsiState),
+        VMSTATE_BOOL(status_irq_unread, Pc98ScsiState),
+        VMSTATE_BOOL(msg_irq_unread, Pc98ScsiState),
+        VMSTATE_BOOL(req_to_initiator, Pc98ScsiState),
+        VMSTATE_BOOL(sat, Pc98ScsiState),
+        VMSTATE_TIMER_PTR(irq_timer, Pc98ScsiState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+/*
+ * Keep PC-9801-92 inquiry strings local to this board.  Extending the generic
+ * legacy SCSI helper for these two properties would make every SCSI caller
+ * carry a PC-98-only interface change.
+ */
+static SCSIDevice *pc98_scsi_add_legacy_drive(SCSIBus *bus,
+                                              BlockBackend *blk,
+                                              int unit, bool removable,
+                                              BlockConf *conf, Error **errp)
+{
+    DriveInfo *dinfo = blk_legacy_dinfo(blk);
+    const char *driver;
+    const char *product;
+    DeviceState *dev;
+    SCSIDevice *s;
+    Error *local_err = NULL;
+    g_autofree char *name = NULL;
+
+    if (blk_is_sg(blk)) {
+        driver = "scsi-generic";
+    } else if (dinfo && dinfo->media_cd) {
+        driver = "scsi-cd";
+    } else {
+        driver = "scsi-hd";
+    }
+    product = dinfo && dinfo->media_cd ? "CD-ROM DRIVE" :
+                                         "PC-9801-92 DISK";
+
+    dev = qdev_new(driver);
+    name = g_strdup_printf("legacy[%d]", unit);
+    object_property_add_child(OBJECT(bus), name, OBJECT(dev));
+
+    s = SCSI_DEVICE(dev);
+    s->conf = *conf;
+
+    check_boot_index(conf->bootindex, &local_err);
+    if (local_err) {
+        object_unparent(OBJECT(dev));
+        error_propagate(errp, local_err);
+        return NULL;
+    }
+    add_boot_device_path(conf->bootindex, dev, NULL);
+
+    qdev_prop_set_uint32(dev, "scsi-id", unit);
+    if (object_property_find(OBJECT(dev), "removable")) {
+        qdev_prop_set_bit(dev, "removable", removable);
+    }
+    if (object_property_find(OBJECT(dev), "vendor")) {
+        qdev_prop_set_string(dev, "vendor", "NEC");
+    }
+    if (object_property_find(OBJECT(dev), "product")) {
+        qdev_prop_set_string(dev, "product", product);
+    }
+    if (!qdev_prop_set_drive_err(dev, "drive", blk, errp)) {
+        object_unparent(OBJECT(dev));
+        return NULL;
+    }
+    if (!qdev_realize_and_unref(dev, &bus->qbus, errp)) {
+        object_unparent(OBJECT(dev));
+        return NULL;
+    }
+    return s;
+}
+
 static void pc98_scsi_realize(DeviceState *dev, Error **errp)
 {
     Pc98ScsiState *s = PC98_SCSI(dev);
@@ -936,12 +1065,9 @@ static void pc98_scsi_realize(DeviceState *dev, Error **errp)
         if (!dinfo) {
             continue;
         }
-        scsi_bus_legacy_add_drive(
-            &s->bus, blk_by_legacy_dinfo(dinfo), unit,
-            dinfo->media_cd,
-            &conf, NULL, "NEC",
-            dinfo->media_cd ? "CD-ROM DRIVE" :
-            "PC-9801-92 DISK", &error_fatal);
+        pc98_scsi_add_legacy_drive(&s->bus, blk_by_legacy_dinfo(dinfo),
+                                   unit, dinfo->media_cd, &conf,
+                                   &error_fatal);
     }
 }
 
@@ -980,6 +1106,7 @@ static void pc98_scsi_class_init(ObjectClass *klass, const void *data)
 
     dc->realize = pc98_scsi_realize;
     dc->unrealize = pc98_scsi_unrealize;
+    dc->vmsd = &vmstate_pc98_scsi;
     device_class_set_legacy_reset(dc, pc98_scsi_reset);
     device_class_set_props(dc, pc98_scsi_properties);
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);

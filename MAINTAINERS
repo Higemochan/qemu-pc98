@@ -2078,8 +2078,10 @@ F: hw/intc/i8259-pc98.c
 F: hw/timer/i8254-pc98.c
 F: hw/dma/pc98-dma.c
 F: hw/block/pc98-fdc.c
+F: hw/char/pc98-serial.c
 F: hw/ide/pc98-ide.c
 F: hw/net/pc98-lgy98.c
+F: hw/scsi/pc98-scsi.c
 F: hw/display/pc98-vga.c
 F: hw/display/pc98-coregraph.c
 F: hw/display/pc98-wab.c
@@ -2093,6 +2095,8 @@ F: hw/audio/emu2149.c
 F: hw/audio/emu2149.h
 F: hw/audio/pc98-wss.c
 F: block/vvfat98.c
+F: block/pc98-vvfat-boot.S
+F: block/pc98-vvfat-boot.h
 F: include/hw/i386/pc98.h
 F: include/hw/misc/pc98-sys.h
 F: include/hw/input/pc98-kbd.h
@@ -2101,13 +2105,17 @@ F: include/hw/intc/i8259-pc98.h
 F: include/hw/timer/i8254-pc98.h
 F: include/hw/dma/pc98-dma.h
 F: include/hw/block/pc98-fdc.h
+F: include/hw/char/pc98-serial.h
 F: include/hw/ide/pc98-ide.h
 F: include/hw/net/pc98-lgy98.h
+F: include/hw/scsi/pc98-scsi.h
 F: include/hw/display/pc98-vga.h
 F: include/hw/display/pc98-coregraph.h
 F: include/hw/display/pc98-wab.h
 F: include/hw/audio/pc98-opna.h
 F: include/hw/audio/pc98-wss.h
+F: scripts/pc98-vvfat-boot-to-header.py
+F: tests/qtest/pc98-machine-test.c
 
 nitro-enclave
 M: Alexander Graf <graf@amazon.com>

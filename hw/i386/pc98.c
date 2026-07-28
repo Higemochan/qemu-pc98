@@ -61,6 +61,7 @@
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
+#include "migration/vmstate.h"
 #include "system/tcg.h"
 #include "target/i386/cpu.h"
 
@@ -277,6 +278,16 @@ static const MemoryRegionPortio pc98_board_ports[] = {
     PORTIO_END_OF_LIST(),
 };
 
+static const VMStateDescription vmstate_pc98_machine = {
+    .name = "pc98-machine",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(shutdown_index, Pc98MachineState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void pc98_devices_init(Pc98MachineState *pms)
 {
     MachineState *machine = MACHINE(pms);
@@ -468,6 +479,7 @@ static void pc98_machine_state_init(MachineState *machine)
     x86_cpus_init(x86ms, CPU_VERSION_LATEST);
 
     pc98_devices_init(pms);
+    vmstate_register(NULL, 0, &vmstate_pc98_machine, pms);
 }
 
 static void pc98_machine_reset(MachineState *machine, ResetType type)
@@ -566,8 +578,10 @@ static void pc9801_class_init(ObjectClass *oc, const void *data)
     Pc98MachineClass *pmc = PC98_MACHINE_CLASS(oc);
 
     mc->desc = "NEC PC-9801";
+    pmc->has_pci = false;
     pmc->has_wab = false;
     pmc->has_pegc = false;
+    pmc->has_coregraph = false;
 
     compat_props_add(mc->compat_props, pc98_compat_props,
                      G_N_ELEMENTS(pc98_compat_props));

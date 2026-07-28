@@ -35,6 +35,7 @@
 #include "hw/input/pc98-kbd.h"
 #include "system/ioport.h"
 #include "ui/input.h"
+#include "migration/vmstate.h"
 
 #define KBD_FIFO_SIZE      256
 
@@ -500,7 +501,49 @@ static void pc98_kbd_reset(DeviceState *dev)
     s->fifo_tail = 0;
     s->fifo_head = 0;
     s->cmd_len = 0;
+    if (s->rx_timer) {
+        timer_del(s->rx_timer);
+    }
+    qemu_set_irq(s->irq, 0);
 }
+
+static int pc98_kbd_post_load(void *opaque, int version_id)
+{
+    Pc98KbdState *s = opaque;
+
+    qemu_set_irq(s->irq, !!(s->status_reg & KST_RXRDY));
+    if (s->fifo_len > 0 && !s->rts && !timer_pending(s->rx_timer)) {
+        timer_mod(s->rx_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  KBD_RX_INTERVAL_NS);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_pc98_kbd = {
+    .name = "pc98-kbd",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = pc98_kbd_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(lock_flags, Pc98KbdState),
+        VMSTATE_UINT8_ARRAY(key_down, Pc98KbdState, 128),
+        VMSTATE_UINT8(cfg_phase, Pc98KbdState),
+        VMSTATE_UINT8(status_reg, Pc98KbdState),
+        VMSTATE_BOOL(rts, Pc98KbdState),
+        VMSTATE_BOOL(rx_enabled, Pc98KbdState),
+        VMSTATE_BOOL(tx_enabled, Pc98KbdState),
+        VMSTATE_UINT8(rx_latch, Pc98KbdState),
+        VMSTATE_UINT8_ARRAY(fifo, Pc98KbdState, KBD_FIFO_SIZE),
+        VMSTATE_INT32(fifo_len, Pc98KbdState),
+        VMSTATE_INT32(fifo_tail, Pc98KbdState),
+        VMSTATE_INT32(fifo_head, Pc98KbdState),
+        VMSTATE_UINT8_ARRAY(cmd_bytes, Pc98KbdState, 2),
+        VMSTATE_INT32(cmd_len, Pc98KbdState),
+        VMSTATE_TIMER_PTR(rx_timer, Pc98KbdState),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static void pc98_kbd_realize(DeviceState *dev, Error **errp)
 {
@@ -521,10 +564,10 @@ static void pc98_kbd_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = pc98_kbd_realize;
+    dc->vmsd = &vmstate_pc98_kbd;
     device_class_set_legacy_reset(dc, pc98_kbd_reset);
     /* Wired by board code (IRQ 1), not user creatable */
     dc->user_creatable = false;
-    /* TODO: migration support (vmstate) */
 }
 
 static const TypeInfo pc98_kbd_info = {

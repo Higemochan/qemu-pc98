@@ -1,5 +1,6 @@
 /*
  * Minimal PC-9821 BIOS / IDE BIOS bank 3
+ * Copyright (C) 2026 Awe Morris
  *
  * This is the first deliberately small implementation of the private disk
  * option-ROM ABI used by the Xa7-family main BIOS.  It provides the HDD
@@ -32,6 +33,7 @@
 	.equ	ATA_SRST,	0x06
 	.equ	ATA_READ,	0xc4
 	.equ	ATA_WRITE,	0xc5
+	.equ	ATA_PACKET,	0xa0
 	.equ	ATA_IDENTIFY,	0xec
 	.equ	ATA_ST_ERR,	0x01
 	.equ	ATA_ST_DRQ,	0x08
@@ -64,6 +66,8 @@
 	.equ	ROM_WORK_CYLINDERS,	0x3000
 	.equ	ROM_WORK_HEADS,		0x3002
 	.equ	ROM_WORK_SECTORS,	0x3004
+	.equ	ROM_WORK_SELECTED,	0x3006
+	.equ	ROM_WORK_TYPES,		0x3008	/* 0=none, 1=ATA HDD, 2=ATAPI */
 
 	/*
 	 * The main BIOS indexes this table in three-byte slots.  Keep even the
@@ -154,8 +158,13 @@ init_entry:
 	pushw	%ds
 	pushw	%ax
 	pushw	%dx
+	pushw	%bx
+	pushw	%cx
+	pushw	%si
+	pushw	%di
 	xorw	%ax, %ax
 	movw	%ax, %ds
+	movb	$0, %cs:ROM_WORK_SELECTED
 
 	/*
 	 * The built-in IDE interrupt is slave IR1 (IRQ9 / vector 11h).  The
@@ -182,23 +191,56 @@ init_entry:
 	movw	$BIOS_SECTORS, %ax
 	movw	%ax, %cs:ROM_WORK_SECTORS
 
-	movw	$IDE_STATUS, %dx
-	inb	%dx, %al
-	cmpb	$0xff, %al
-	je	1f
-	testb	%al, %al
-	jz	1f
+	movw	$ROM_WORK_TYPES, %di
+	xorw	%si, %si
+2:
+	movw	%si, %ax
+	movb	%al, %cs:ROM_WORK_SELECTED
+	call	ata_probe_device
+	movb	%al, %cs:(%di)
+	incw	%di
+	incw	%si
+	cmpw	$4, %si
+	jb	2b
 
+	movb	$0, %cs:ROM_WORK_SELECTED
+	cmpb	$1, %cs:ROM_WORK_TYPES
+	jne	3f
 	call	ata_identify_geometry
-
-	orw	$0x0001, WA_DRIVES
+3:
+	xorw	%bx, %bx
+	cmpb	$1, %cs:ROM_WORK_TYPES+0
+	jne	4f
+	orw	$0x0001, %bx
+4:
+	cmpb	$1, %cs:ROM_WORK_TYPES+1
+	jne	5f
+	orw	$0x0002, %bx
+5:
+	cmpb	$1, %cs:ROM_WORK_TYPES+2
+	jne	6f
+	orw	$0x0004, %bx
+6:
+	cmpb	$1, %cs:ROM_WORK_TYPES+3
+	jne	7f
+	orw	$0x0008, %bx
+7:
+	orw	%bx, WA_DRIVES
+	testw	%bx, %bx
+	jz	1f
 	orb	$0x01, WA_IDE_PROBE
 	andb	$0xc7, WA_GEOMETRY
 	orb	$0x10, WA_GEOMETRY	/* drive 0: variable 8/17 profile */
 	orb	$0x48, WA_IDE_FLAGS	/* fast IDE and fixed-disk boot */
 	orb	$0x80, WA_DISK_FLAGS
+	cmpb	$1, %cs:ROM_WORK_TYPES
+	jne	1f
 	movb	$0x80, WA_BOOT_DEVICE
 1:
+	popw	%di
+	popw	%si
+	popw	%cx
+	popw	%bx
 	popw	%dx
 	popw	%ax
 	popw	%ds
@@ -296,6 +338,9 @@ int1b_entry:
 	incb	WA_BUSY
 	xorw	%ax, %ax
 	movw	%ax, %ds
+	movb	0(%bp), %al
+	andb	$0x03, %al
+	movb	%al, %cs:ROM_WORK_SELECTED
 
 	movb	1(%bp), %al
 	andb	$0x0f, %al
@@ -311,6 +356,16 @@ int1b_entry:
 	jmp	int1b_finish
 
 int1b_sense:
+	xorw	%bx, %bx
+	movb	%cs:ROM_WORK_SELECTED, %bl
+	cmpb	$2, %cs:ROM_WORK_TYPES(%bx)
+	jne	1f
+	movw	$2048, 2(%bp)
+	movw	$0xffff, 4(%bp)
+	movw	$0xffff, 6(%bp)
+	movb	$0x0f, %ah
+	jmp	int1b_finish
+1:
 	movw	$512, 2(%bp)
 	movw	%cs:ROM_WORK_CYLINDERS, %ax
 	movw	%ax, 4(%bp)
@@ -321,13 +376,30 @@ int1b_sense:
 	jmp	int1b_finish
 
 int1b_read:
+	xorw	%bx, %bx
+	movb	%cs:ROM_WORK_SELECTED, %bl
+	cmpb	$2, %cs:ROM_WORK_TYPES(%bx)
+	je	int1b_atapi_read
 	call	request_lba
 	jc	int1b_finish
 	call	request_count_buffer
 	call	ata_pio_read_bytes
 	jmp	int1b_finish
 
+int1b_atapi_read:
+	call	request_linear_lba
+	call	request_count_buffer
+	call	atapi_pio_read_bytes
+	jmp	int1b_finish
+
 int1b_write:
+	xorw	%bx, %bx
+	movb	%cs:ROM_WORK_SELECTED, %bl
+	cmpb	$2, %cs:ROM_WORK_TYPES(%bx)
+	jne	1f
+	movb	$0x40, %ah		/* packet media are read-only here */
+	jmp	int1b_finish
+1:
 	call	request_lba
 	jc	int1b_finish
 	call	request_count_buffer
@@ -362,7 +434,8 @@ int1b_finish:
  * than 1 GiB.
  */
 request_lba:
-	testb	$0x01, 0(%bp)
+	movb	0(%bp), %al
+	andb	$0x7c, %al
 	jnz	request_bad_device
 	testb	$0x80, 0(%bp)
 	jz	request_relative
@@ -391,6 +464,15 @@ request_relative:
 request_bad_device:
 	movb	$0x60, %ah		/* not ready */
 	stc
+	ret
+
+/* ATAPI READ(10) always addresses 2048-byte logical blocks linearly. */
+request_linear_lba:
+	movzwl	4(%bp), %eax
+	movzbl	6(%bp), %edx
+	shll	$16, %edx
+	orl	%edx, %eax
+	clc
 	ret
 
 /*
@@ -427,6 +509,87 @@ ata_reset:
 	ret
 
 /*
+ * Probe the selected channel/unit without relying on the sibling-response
+ * behaviour of an ATA bus.  Return AL=0 for absent, 1 for ATA HDD, and
+ * 2 for an ATAPI packet device.
+ */
+ata_probe_device:
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+
+	call	ata_select_channel
+	testb	$0x01, %cs:ROM_WORK_SELECTED
+	jz	1f
+	movw	$0x0430, %dx
+	inb	%dx, %al
+	testb	$0x40, %al
+	jz	ata_probe_absent
+1:
+	movw	$IDE_DRVHEAD, %dx
+	movb	$0xa0, %al
+	testb	$0x01, %cs:ROM_WORK_SELECTED
+	jz	2f
+	orb	$0x10, %al
+2:
+	outb	%al, %dx
+	movw	$IDE_STATUS, %dx
+	movw	$0xffff, %cx
+3:
+	inb	%dx, %al
+	cmpb	$0xff, %al
+	je	ata_probe_absent
+	testb	%al, %al
+	jz	ata_probe_absent
+	testb	$ATA_ST_BSY, %al
+	jz	4f
+	loop	3b
+	jmp	ata_probe_absent
+4:
+	movb	$ATA_IDENTIFY, %al
+	outb	%al, %dx
+	movw	$0xffff, %cx
+5:
+	inb	%dx, %al
+	testb	$ATA_ST_BSY, %al
+	jz	6f
+	loop	5b
+	jmp	ata_probe_absent
+6:
+	testb	$ATA_ST_DRQ, %al
+	jnz	ata_probe_hdd
+	testb	$ATA_ST_ERR, %al
+	jz	ata_probe_absent
+	movw	$IDE_CYLLO, %dx
+	inb	%dx, %al
+	movb	%al, %bl
+	movw	$IDE_CYLHI, %dx
+	inb	%dx, %al
+	cmpb	$0xeb, %al
+	jne	ata_probe_absent
+	cmpb	$0x14, %bl
+	jne	ata_probe_absent
+	movb	$2, %al
+	jmp	ata_probe_done
+
+ata_probe_hdd:
+	movw	$IDE_DATA, %dx
+	movw	$256, %cx
+7:
+	inw	%dx, %ax
+	loop	7b
+	movb	$1, %al
+	jmp	ata_probe_done
+
+ata_probe_absent:
+	xorb	%al, %al
+ata_probe_done:
+	popw	%dx
+	popw	%cx
+	popw	%bx
+	ret
+
+/*
  * Read the current master's legacy geometry from ATA IDENTIFY words 1, 3
  * and 6.  QEMU's pc98 IDE controller reports the machine's required 8/17
  * translation here, with the cylinder count derived from the image size.
@@ -441,11 +604,13 @@ ata_identify_geometry:
 	pushw	%dx
 	pushw	%si
 
-	movw	$IDE_CHANNEL, %dx
-	xorb	%al, %al
-	outb	%al, %dx
+	call	ata_select_channel
 	movw	$IDE_DRVHEAD, %dx
 	movb	$0xa0, %al
+	testb	$0x01, %cs:ROM_WORK_SELECTED
+	jz	4f
+	orb	$0x10, %al
+4:
 	outb	%al, %dx
 	call	ata_wait_ready
 	jc	2f
@@ -505,9 +670,7 @@ ata_setup:
 	movw	%cx, %si
 	movl	%eax, %ebx
 
-	movw	$IDE_CHANNEL, %dx
-	xorb	%al, %al
-	outb	%al, %dx
+	call	ata_select_channel
 	call	ata_wait_ready
 	jc	1f
 
@@ -527,10 +690,31 @@ ata_setup:
 	movb	%bh, %al
 	andb	$0x0f, %al
 	orb	$0xe0, %al
+	testb	$0x01, %cs:ROM_WORK_SELECTED
+	jz	2f
+	orb	$0x10, %al
+2:
 	movw	$IDE_DRVHEAD, %dx
 	outb	%al, %dx
 	clc
 1:
+	ret
+
+/*
+ * Select the multiplexed ATA channel for the current BIOS unit.  Units
+ * 80h/81h are channel 0 master/slave and 82h/83h are channel 1
+ * master/slave.  The device bit itself is applied to DEV/HEAD by callers.
+ */
+ata_select_channel:
+	pushw	%ax
+	pushw	%dx
+	movb	%cs:ROM_WORK_SELECTED, %al
+	shrb	$1, %al
+	andb	$0x01, %al
+	movw	$IDE_CHANNEL, %dx
+	outb	%al, %dx
+	popw	%dx
+	popw	%ax
 	ret
 
 ata_pio_read:
@@ -610,6 +794,108 @@ ata_pio_read_bytes:
 	xorw	%ax, %ax
 	clc
 5:
+	popl	%ebp
+	ret
+
+/*
+ * Read byte-counted 2048-byte logical blocks from the selected ATAPI
+ * device with a twelve-byte READ(10) packet.  The INT 1Bh address is the
+ * 24-bit linear block number in DL:CX; a partial final block is drained so
+ * the packet device always returns to command phase.
+ */
+atapi_pio_read_bytes:
+	pushl	%ebp
+	pushl	%esi
+	movl	%eax, %ebp
+	movzwl	%bx, %esi
+	testl	%esi, %esi
+	jnz	1f
+	movl	$0x00010000, %esi
+1:
+	call	ata_select_channel
+	movw	$IDE_DRVHEAD, %dx
+	movb	$0xa0, %al
+	testb	$0x01, %cs:ROM_WORK_SELECTED
+	jz	2f
+	orb	$0x10, %al
+2:
+	outb	%al, %dx
+	movw	$IDE_STATUS, %dx
+	movw	$0xffff, %cx
+3:
+	inb	%dx, %al
+	cmpb	$0xff, %al
+	je	8f
+	testb	$ATA_ST_BSY, %al
+	jz	4f
+	loop	3b
+	jmp	8f
+4:
+	movw	$IDE_ERROR, %dx
+	xorb	%al, %al		/* FEATURES: PIO, no overlap */
+	outb	%al, %dx
+	movw	$IDE_SECCNT, %dx
+	outb	%al, %dx
+	movw	$IDE_CYLLO, %dx
+	outb	%al, %dx		/* transfer byte count 0800h */
+	movw	$IDE_CYLHI, %dx
+	movb	$0x08, %al
+	outb	%al, %dx
+	movw	$IDE_COMMAND, %dx
+	movb	$ATA_PACKET, %al
+	outb	%al, %dx
+	call	ata_wait_drq
+	jc	8f
+
+	/* Twelve-byte SCSI READ(10) packet, one logical block. */
+	movw	$IDE_DATA, %dx
+	movw	$0x0028, %ax
+	outw	%ax, %dx
+	movl	%ebp, %eax
+	bswapl	%eax
+	outw	%ax, %dx
+	shrl	$16, %eax
+	outw	%ax, %dx
+	xorw	%ax, %ax
+	outw	%ax, %dx
+	movw	$0x0001, %ax
+	outw	%ax, %dx
+	xorw	%ax, %ax
+	outw	%ax, %dx
+
+	call	ata_wait_drq
+	jc	8f
+	movw	$IDE_DATA, %dx
+	cmpl	$2048, %esi
+	jb	5f
+	movw	$1024, %cx
+	rep	insw
+	subl	$2048, %esi
+	jmp	6f
+5:
+	movl	%esi, %ecx
+	shrl	$1, %ecx
+	rep	insw
+	movw	$1024, %cx
+	movw	%si, %ax
+	shrw	$1, %ax
+	subw	%ax, %cx
+7:
+	inw	%dx, %ax
+	loop	7b
+	xorl	%esi, %esi
+6:
+	incl	%ebp
+	testl	%esi, %esi
+	jnz	1b
+	xorw	%ax, %ax
+	clc
+	jmp	9f
+8:
+	movb	$0x40, %ah
+	stc
+9:
+	popl	%esi
 	popl	%ebp
 	ret
 

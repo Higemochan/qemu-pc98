@@ -26,9 +26,11 @@ Pc98VgaState *pc98_vga_init(MemoryRegion *system_io, qemu_irq irq,
                             bool has_pegc,
                             Pc98VgaRegions *regions);
 
-/* Let a board-level monitor relay reuse and switch back to the GDC console. */
+/* Let a board-level monitor relay reuse and render the GDC console. */
 QemuConsole *pc98_vga_get_console(Pc98VgaState *s);
-void pc98_vga_select_console(Pc98VgaState *s);
+bool pc98_vga_update_console(Pc98VgaState *s);
+void pc98_vga_invalidate_console(Pc98VgaState *s);
+bool pc98_vga_display_enabled(Pc98VgaState *s);
 
 void pc98_vga_select_ems(void *opaque, uint32_t value);
 

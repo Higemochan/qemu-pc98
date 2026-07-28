@@ -2394,10 +2394,7 @@ static void cirrus_vga_ioport_write(void *opaque, hwaddr addr, uint64_t val,
     }
 }
 
-/*
- * Migration state is intentionally omitted: the WAB device has no vmstate
- * (see pc98_wab_class_init), so the Cirrus core vmstate is not needed here.
- */
+/* Migration is defined by the board wrapper after its mapping registers. */
 
 /***************************************
  *
@@ -2818,12 +2815,83 @@ static void pc98_wab_reset(DeviceState *dev)
 {
     Pc98WabState *s = PC98_WAB(dev);
 
+    if (s->lfb_movable_base) {
+        memory_region_del_subregion(get_system_memory(), &s->lfb_movable);
+        s->lfb_movable_base = 0;
+    }
     s->reg_index = 0;
     s->reg_index_a2 = 0;
     s->video_enable = 0;
     s->relay = 0;
     s->mmio_enable = 0;
 }
+
+static int pc98_wab_pre_save(void *opaque)
+{
+    Pc98WabState *s = opaque;
+
+    /* Match the shared Cirrus device: snapshots are taken between BLTs. */
+    return s->cirrus.cirrus_srccounter ? -EBUSY : 0;
+}
+
+static int pc98_wab_pre_load(void *opaque)
+{
+    Pc98WabState *s = opaque;
+
+    if (s->lfb_movable_base) {
+        memory_region_del_subregion(get_system_memory(), &s->lfb_movable);
+        s->lfb_movable_base = 0;
+    }
+    return 0;
+}
+
+static int pc98_wab_post_load(void *opaque, int version_id)
+{
+    Pc98WabState *s = opaque;
+    CirrusVGAState *c = &s->cirrus;
+
+    c->vga.gr[0x00] = c->cirrus_shadow_gr0 & 0x0f;
+    c->vga.gr[0x01] = c->cirrus_shadow_gr1 & 0x0f;
+    cirrus_update_bank_ptr(c, 0);
+    cirrus_update_bank_ptr(c, 1);
+    cirrus_update_memory_access(c);
+    c->vga.graphic_mode = -1;
+
+    if (s->lfb_movable_base) {
+        memory_region_add_subregion_overlap(get_system_memory(),
+                                            s->lfb_movable_base,
+                                            &s->lfb_movable, 2);
+    }
+    memory_region_set_enabled(&s->lfb, s->fixed_lfb);
+    return 0;
+}
+
+static const VMStateDescription vmstate_pc98_wab = {
+    .name = "pc98-wab",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = pc98_wab_pre_save,
+    .pre_load = pc98_wab_pre_load,
+    .post_load = pc98_wab_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT(cirrus.vga, Pc98WabState, 0,
+                       vmstate_vga_common, VGACommonState),
+        VMSTATE_UINT8(cirrus.cirrus_shadow_gr0, Pc98WabState),
+        VMSTATE_UINT8(cirrus.cirrus_shadow_gr1, Pc98WabState),
+        VMSTATE_UINT8(cirrus.cirrus_hidden_dac_lockindex, Pc98WabState),
+        VMSTATE_UINT8(cirrus.cirrus_hidden_dac_data, Pc98WabState),
+        VMSTATE_UINT8_ARRAY(cirrus.cirrus_hidden_palette, Pc98WabState, 48),
+        VMSTATE_UINT32(cirrus.vga.hw_cursor_x, Pc98WabState),
+        VMSTATE_UINT32(cirrus.vga.hw_cursor_y, Pc98WabState),
+        VMSTATE_UINT32(lfb_movable_base, Pc98WabState),
+        VMSTATE_UINT8(reg_index, Pc98WabState),
+        VMSTATE_UINT8(reg_index_a2, Pc98WabState),
+        VMSTATE_UINT8(video_enable, Pc98WabState),
+        VMSTATE_UINT8(relay, Pc98WabState),
+        VMSTATE_UINT8(mmio_enable, Pc98WabState),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static void pc98_wab_class_init(ObjectClass *klass, const void *data)
 {
@@ -2833,11 +2901,11 @@ static void pc98_wab_class_init(ObjectClass *klass, const void *data)
     };
 
     dc->realize = pc98_wab_realize;
+    dc->vmsd = &vmstate_pc98_wab;
     device_class_set_legacy_reset(dc, pc98_wab_reset);
     device_class_set_props(dc, properties);
     dc->user_creatable = false;
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
-    /* TODO: migration (reuse the Cirrus vmstate once the layout is settled) */
 }
 
 static const TypeInfo pc98_wab_info = {

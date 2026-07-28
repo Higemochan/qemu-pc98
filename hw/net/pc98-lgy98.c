@@ -11,8 +11,8 @@
  *   0x00D0-0x00DF (base+0x00..0x0f)  DP8390 register block (1-byte access)
  *   0x02D0        (base+0x200)       NE2000 ASIC data port (remote DMA,
  *                                    8- and 16-bit access)
- *   0x00E8        (base+0x18)        a read pulses the card reset
- *   0x03D0-0x03DF (base+0x300)       LGY-98 board-ID / "knock" ports
+ *   0x03D0        (base+0x300)       NE2000 reset latch
+ *   0x03DA-0x03DD (base+0x30a..30d)  LGY-98 board-ID ports
  *
  * This device reuses QEMU's shared NE2000 core (hw/net/ne2000.c)
  * unchanged: it builds the core's 0x20-byte I/O region with
@@ -56,8 +56,10 @@
 #define LGY98_IOBASE        0x00d0
 #define LGY98_REG_OFFSET    0x000   /* DP8390 register block   -> core 0x00 */
 #define LGY98_ASIC_OFFSET   0x200   /* NE2000 ASIC data port   -> core 0x10 */
-#define LGY98_RESET_OFFSET  0x018   /* reset pulse (read)      -> core 0x1f */
+#define LGY98_RESET_OFFSET  0x300   /* reset latch             -> core 0x1f */
 #define LGY98_BOARD_OFFSET  0x300   /* LGY-98 board-ID ports                */
+#define LGY98_BOARD_ID_FIRST 0x0a
+#define LGY98_BOARD_ID_COUNT 4
 
 OBJECT_DECLARE_SIMPLE_TYPE(Pc98Lgy98State, PC98_LGY98)
 
@@ -103,7 +105,8 @@ static void lgy98_board_write(void *opaque, uint32_t addr, uint32_t val)
 }
 
 static const MemoryRegionPortio lgy98_board_portio[] = {
-    { LGY98_IOBASE + LGY98_BOARD_OFFSET, 16, 1,
+    { LGY98_IOBASE + LGY98_BOARD_OFFSET + LGY98_BOARD_ID_FIRST,
+      LGY98_BOARD_ID_COUNT, 1,
       .read = lgy98_board_read, .write = lgy98_board_write },
     PORTIO_END_OF_LIST(),
 };
@@ -151,7 +154,11 @@ static void pc98_lgy98_realize(DeviceState *dev, Error **errp)
                                 LGY98_IOBASE + LGY98_ASIC_OFFSET,
                                 &s->asic_alias);
 
-    /* a read at base+0x18 hits core offset 0x1f, which resets the chip. */
+    /*
+     * Linux/98's NE2K C-bus driver maps the LGY-98 reset register to
+     * base+0x300.  Keep the separate board-ID mapping limited to
+     * base+0x30a..0x30d so it cannot shadow this alias.
+     */
     memory_region_init_alias(&s->reset_alias, OBJECT(dev), "pc98-lgy98-reset",
                              &n->io, 0x1f, 1);
     memory_region_add_subregion(get_system_io(),

@@ -52,6 +52,7 @@
 #include "qemu/ctype.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
+#include "pc98-vvfat-boot.h"
 
 #ifndef S_IWGRP
 #define S_IWGRP 0
@@ -98,6 +99,8 @@ static void checkpoint(void);
 #define PC98_HEADS  8
 #define PC98_SECS   17
 #define PC98_PART_START_CYL  1
+#define PC98_DOS_SECTOR_SIZE 1024
+#define PC98_DOS_SECTOR_SCALE (PC98_DOS_SECTOR_SIZE / BDRV_SECTOR_SIZE)
 
 #define DIR_DELETED 0xe5
 #define DIR_KANJI DIR_DELETED
@@ -367,36 +370,6 @@ typedef struct BDRVVVFAT98State {
     Error *migration_blocker;
 } BDRVVVFAT98State;
 
-/*
- * A PC-98 IPL (LBA 0): the "IPL1" signature at offset 4 marks the disk as
- * initialised, and the loader (which only runs when the disk is booted)
- * reads the active partition's boot sector via INT 1Bh and jumps to it.
- * This is the exact 512-byte IPL an MS-DOS 6.20 install writes; for a data
- * disk it never executes, but its presence makes DOS accept the disk.
- */
-static const uint8_t pc98_ipl[512] = {
-    0xeb,0x0a,0x90,0x90,0x49,0x50,0x4c,0x31,0x00,0x00,0x00,0x1e,
-    0xa0,0x84,0x05,0xb4,0x8e,0xcd,0x1b,0xa8,0x20,0x74,0x22,0x32,
-    0xdb,0xb4,0x14,0xcd,0x1b,0x72,0x1a,0x80,0xfb,0x84,0x75,0x15,
-    0xe8,0x96,0x00,0x73,0x03,0xeb,0x6b,0x90,0xb4,0x24,0xbb,0x00,
-    0x04,0xb9,0x30,0x12,0xba,0x40,0x01,0xcd,0x1b,0xbb,0x00,0x01,
-    0xb4,0x84,0xcd,0x1b,0xb4,0x06,0x33,0xc9,0x33,0xd2,0x50,0x8c,
-    0xc8,0x2d,0xc0,0x03,0x8e,0xc0,0x58,0x33,0xed,0xcd,0x1b,0x72,
-    0x41,0xb4,0x06,0xba,0x01,0x00,0x81,0xc5,0x00,0x08,0xcd,0x1b,
-    0x72,0x34,0xba,0x04,0x00,0xf7,0xc3,0x00,0xaa,0x74,0x03,0xba,
-    0x02,0x00,0xb4,0x06,0xbb,0x00,0x1c,0x81,0xc5,0x00,0x08,0xcd,
-    0x1b,0x72,0x1b,0x50,0x8b,0xc5,0xb1,0x04,0xd3,0xe8,0x8c,0xc1,
-    0x03,0xc1,0x8b,0xf0,0x58,0xe8,0x15,0x00,0x2e,0x89,0x36,0x0a,
-    0x00,0x2e,0xff,0x1e,0x08,0x00,0xe8,0x08,0x00,0xb4,0x0e,0xcd,
-    0x1b,0xb9,0x01,0x00,0xcb,0x56,0xa0,0x84,0x05,0x32,0xdb,0xb4,
-    0x14,0xcd,0x1b,0x72,0x0e,0x80,0xfb,0x84,0x75,0x09,0x2e,0xc6,
-    0x06,0xc6,0x49,0x00,0xe8,0x02,0x00,0x5e,0xc3,0xb4,0xb0,0xbe,
-    0xc2,0x49,0xba,0x06,0x00,0x1e,0x0e,0x1f,0xcd,0x1b,0xb4,0xb0,
-    0xcd,0x1b,0x1f,0xc3,0x1e,0x00,0x00,0x00,0x01,0x00,0x00,0x00,
-    [0x1f4] = 0x09, [0x1f6] = 0x55, [0x1f7] = 0xaa,
-    [0x1fc] = 0x09, [0x1fe] = 0x55, [0x1ff] = 0xaa,
-};
-
 /* one 32-byte PC-98 IPL partition-table entry (LBA 1 holds up to 16) */
 typedef struct pc98_partition_t {
     uint8_t  mid;               /* +0  system/boot indicator */
@@ -421,7 +394,7 @@ static void init_mbr(BDRVVVFAT98State *s, int cyls, int heads, int secs)
     int end_cyl = cyls - 1;
 
     /* LBA 0: the IPL (initialised-disk marker + boot loader) */
-    memcpy(s->first_sectors, pc98_ipl, sizeof(pc98_ipl));
+    memcpy(s->first_sectors, pc98_vvfat_ipl, sizeof(pc98_vvfat_ipl));
 
     /* LBA 1: partition table, single DOS partition spanning cyl 1..end */
     memset(s->first_sectors + 0x200, 0, 0x200);
@@ -784,6 +757,17 @@ static inline direntry_t* create_short_and_long_name(BDRVVVFAT98State* s,
 /*
  * Read a directory. (the index of the corresponding mapping must be passed).
  */
+static int pc98_system_file_priority(const char *filename)
+{
+    if (!g_ascii_strcasecmp(filename, "IO.SYS")) {
+        return 0;
+    }
+    if (!g_ascii_strcasecmp(filename, "MSDOS.SYS")) {
+        return 1;
+    }
+    return 2;
+}
+
 static int read_directory(BDRVVVFAT98State* s, int mapping_index)
 {
     mapping_t* mapping = array_get(&(s->mapping), mapping_index);
@@ -797,7 +781,7 @@ static int read_directory(BDRVVVFAT98State* s, int mapping_index)
 
     DIR* dir=opendir(dirname);
     struct dirent* entry;
-    int i;
+    int i, pass;
 
     assert(mapping->mode & MODE_DIRECTORY);
 
@@ -815,6 +799,15 @@ static int read_directory(BDRVVVFAT98State* s, int mapping_index)
         (void)create_short_and_long_name(s, i, "..", 1);
     }
 
+    /*
+     * PC-98 MS-DOS 6.x expects IO.SYS and MSDOS.SYS at the start of the
+     * allocation order.  Host directory iteration order is unspecified, so
+     * make the two system files deterministic in the root directory.
+     */
+    pass = first_cluster == 0 ? 0 : 2;
+next_pass:
+    rewinddir(dir);
+
     /* actually read the directory, and allocate the mappings */
     while((entry=readdir(dir))) {
         unsigned int length=strlen(dirname)+2+strlen(entry->d_name);
@@ -822,6 +815,11 @@ static int read_directory(BDRVVVFAT98State* s, int mapping_index)
         struct stat st;
         int is_dot=!strcmp(entry->d_name,".");
         int is_dotdot=!strcmp(entry->d_name,"..");
+        int priority = pc98_system_file_priority(entry->d_name);
+
+        if (first_cluster == 0 && priority != pass) {
+            continue;
+        }
 
         if (first_cluster == 0 && s->directory.next >= s->root_entries - 1) {
             fprintf(stderr, "Too many entries in root directory\n");
@@ -842,7 +840,16 @@ static int read_directory(BDRVVVFAT98State* s, int mapping_index)
 
         /* create directory entry for this file */
         if (!is_dot && !is_dotdot) {
-            direntry = create_short_and_long_name(s, i, entry->d_name, 0);
+            if (first_cluster == 0 && priority < 2) {
+                /*
+                 * DOS 6.x predates VFAT long names.  Keep its boot files as
+                 * plain 8.3 entries so they occupy the first two file slots.
+                 */
+                direntry = create_short_filename(s, entry->d_name, i);
+            } else {
+                direntry = create_short_and_long_name(s, i,
+                                                      entry->d_name, 0);
+            }
         } else {
             direntry = array_get(&(s->directory), is_dot ? i : i + 1);
         }
@@ -893,6 +900,9 @@ static int read_directory(BDRVVVFAT98State* s, int mapping_index)
         } else {
             g_free(buffer);
         }
+    }
+    if (++pass < 3) {
+        goto next_pass;
     }
     closedir(dir);
 
@@ -959,7 +969,13 @@ static int init_directories(BDRVVVFAT98State* s,
     i = 1+s->sectors_per_cluster*0x200*8/s->fat_type;
     s->sectors_per_fat=(s->sector_count+i)/i; /* round up */
 
-    s->offset_to_fat = s->offset_to_bootsector + 1;
+    /*
+     * NEC MS-DOS uses 1024-byte logical sectors on PC-98 fixed disks, while
+     * QEMU's block layer and ATA device operate in 512-byte sectors.
+     */
+    s->sectors_per_fat = ROUND_UP(s->sectors_per_fat,
+                                  PC98_DOS_SECTOR_SCALE);
+    s->offset_to_fat = s->offset_to_bootsector + PC98_DOS_SECTOR_SCALE;
     s->offset_to_root_dir = s->offset_to_fat + s->sectors_per_fat * 2;
 
     array_init(&(s->mapping),sizeof(mapping_t));
@@ -1055,24 +1071,28 @@ static int init_directories(BDRVVVFAT98State* s,
 
     bootsector = (bootsector_t *)(s->first_sectors
                                   + s->offset_to_bootsector * 0x200);
-    bootsector->jump[0]=0xeb;
-    bootsector->jump[1]=0x3e;
-    bootsector->jump[2]=0x90;
+    memcpy(bootsector, pc98_vvfat_pbr, sizeof(pc98_vvfat_pbr));
     memcpy(bootsector->name, BOOTSECTOR_OEM_NAME, 8);
-    bootsector->sector_size=cpu_to_le16(0x200);
-    bootsector->sectors_per_cluster=s->sectors_per_cluster;
+    bootsector->sector_size = cpu_to_le16(PC98_DOS_SECTOR_SIZE);
+    bootsector->sectors_per_cluster =
+        s->sectors_per_cluster / PC98_DOS_SECTOR_SCALE;
     bootsector->reserved_sectors=cpu_to_le16(1);
     bootsector->number_of_fats=0x2; /* number of FATs */
     bootsector->root_entries = cpu_to_le16(s->root_entries);
-    bootsector->total_sectors16=s->sector_count>0xffff?0:cpu_to_le16(s->sector_count);
+    bootsector->total_sectors16 =
+        s->sector_count / PC98_DOS_SECTOR_SCALE > UINT16_MAX ?
+        0 : cpu_to_le16(s->sector_count / PC98_DOS_SECTOR_SCALE);
     /* media descriptor: hard disk=0xf8, floppy=0xf0 */
     bootsector->media_type = (s->offset_to_bootsector > 0 ? 0xf8 : 0xf0);
     s->fat.pointer[0] = bootsector->media_type;
-    bootsector->sectors_per_fat=cpu_to_le16(s->sectors_per_fat);
+    bootsector->sectors_per_fat =
+        cpu_to_le16(s->sectors_per_fat / PC98_DOS_SECTOR_SCALE);
     bootsector->sectors_per_track = cpu_to_le16(secs);
     bootsector->number_of_heads = cpu_to_le16(heads);
     bootsector->hidden_sectors = cpu_to_le32(s->offset_to_bootsector);
-    bootsector->total_sectors=cpu_to_le32(s->sector_count>0xffff?s->sector_count:0);
+    bootsector->total_sectors = cpu_to_le32(
+        s->sector_count / PC98_DOS_SECTOR_SCALE > UINT16_MAX ?
+        s->sector_count / PC98_DOS_SECTOR_SCALE : 0);
 
     /* LATER TODO: if FAT32, this is wrong */
     /* drive_number: fda=0, hda=0x80 */
@@ -1084,6 +1104,20 @@ static int init_directories(BDRVVVFAT98State* s,
            sizeof(bootsector->u.fat16.volume_label));
     memcpy(bootsector->u.fat16.fat_type,
            s->fat_type == 12 ? "FAT12   " : "FAT16   ", 8);
+
+    /*
+     * NEC DOS fixed-disk BPB extension (offsets 0x3e..0x45):
+     * absolute partition start, relative data start, and physical sector
+     * size used by INT 1Bh.  IO.SYS consumes these after the PBR transfers
+     * control, so they must not be occupied by boot code.
+     */
+    stl_le_p(&bootsector->u.fat16.ignored[0], s->offset_to_bootsector);
+    stw_le_p(&bootsector->u.fat16.ignored[4],
+             s->offset_to_root_dir +
+             s->root_entries * sizeof(direntry_t) / BDRV_SECTOR_SIZE -
+             s->offset_to_bootsector);
+    stw_le_p(&bootsector->u.fat16.ignored[6], BDRV_SECTOR_SIZE);
+
     bootsector->magic[0]=0x55; bootsector->magic[1]=0xaa;
 
     return 0;

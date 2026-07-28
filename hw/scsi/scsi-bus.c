@@ -426,8 +426,7 @@ static void scsi_qdev_unrealize(DeviceState *qdev)
 /* handle legacy '-drive if=scsi,...' cmd line args */
 SCSIDevice *scsi_bus_legacy_add_drive(SCSIBus *bus, BlockBackend *blk,
                                       int unit, bool removable, BlockConf *conf,
-                                      const char *serial, const char *vendor,
-                                      const char *product, Error **errp)
+                                      const char *serial, Error **errp)
 {
     const char *driver;
     char *name;
@@ -469,12 +468,6 @@ SCSIDevice *scsi_bus_legacy_add_drive(SCSIBus *bus, BlockBackend *blk,
     if (serial && object_property_find(OBJECT(dev), "serial")) {
         qdev_prop_set_string(dev, "serial", serial);
     }
-    if (vendor && object_property_find(OBJECT(dev), "vendor")) {
-        qdev_prop_set_string(dev, "vendor", vendor);
-    }
-    if (product && object_property_find(OBJECT(dev), "product")) {
-        qdev_prop_set_string(dev, "product", product);
-    }
     if (!qdev_prop_set_drive_err(dev, "drive", blk, errp)) {
         object_unparent(OBJECT(dev));
         return NULL;
@@ -502,8 +495,7 @@ void scsi_bus_legacy_handle_cmdline(SCSIBus *bus)
         }
         qemu_opts_loc_restore(dinfo->opts);
         scsi_bus_legacy_add_drive(bus, blk_by_legacy_dinfo(dinfo),
-                                  unit, false, &conf, NULL, NULL, NULL,
-                                  &error_fatal);
+                                  unit, false, &conf, NULL, &error_fatal);
     }
     loc_pop(&loc);
 }

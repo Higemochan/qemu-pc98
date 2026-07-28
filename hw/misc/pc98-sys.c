@@ -40,6 +40,7 @@
 #include "hw/misc/pc98-sys.h"
 #include "system/address-spaces.h"
 #include "system/rtc.h"
+#include "migration/vmstate.h"
 #include "trace.h"
 
 /* Serial control lines on the calendar-clock command port (0x20). */
@@ -81,6 +82,7 @@ struct Pc98SysState {
     uint8_t  tick_count;
     uint8_t  hrtime_count;
     bool     hrtime_initialized;
+    bool     tick_irq_level;
 
     /* system 8255 PPI (ports 0x31-0x37) */
     uint8_t sys_a;
@@ -165,6 +167,7 @@ static void pc98_sys_tick(void *opaque)
     if (period) {
         if (++s->tick_count >= period) {
             qemu_set_irq(s->irq, 1);
+            s->tick_irq_level = true;
             s->tick_count = 0;
             trace_pc98_sys_hrtimer_irq(s->tick_mode);
         }
@@ -282,6 +285,7 @@ static void cal_tick_ctl_write(void *opaque, uint32_t addr, uint32_t value)
     s->tick_mode = value & 0x03;
     s->tick_count = 0;
     qemu_set_irq(s->irq, 0);
+    s->tick_irq_level = false;
     trace_pc98_sys_hrtimer_write(value, s->tick_mode);
 }
 
@@ -291,6 +295,7 @@ static uint32_t cal_tick_ctl_read(void *opaque, uint32_t addr)
     uint8_t value = 0x80 | s->tick_mode;
 
     qemu_set_irq(s->irq, 0);        /* reading acknowledges the interrupt */
+    s->tick_irq_level = false;
     trace_pc98_sys_hrtimer_read(value);
     return value;
 }
@@ -547,6 +552,7 @@ static void pc98_sys_reset(DeviceState *dev)
     s->hrtime_count = 0;
     s->hrtime_initialized = false;
     qemu_set_irq(s->irq, 0);
+    s->tick_irq_level = false;
 
     s->sys_a = 0x00;
     s->sys_b = 0x00;
@@ -562,6 +568,51 @@ static void pc98_sys_reset(DeviceState *dev)
 
     s->sdip_bank = 0;
 }
+
+static int pc98_sys_post_load(void *opaque, int version_id)
+{
+    Pc98SysState *s = opaque;
+
+    qemu_set_irq(s->irq, s->tick_irq_level);
+    pc98_sysppi_c_write(s, 0, s->sys_c);
+    return 0;
+}
+
+static const VMStateDescription vmstate_pc98_sys = {
+    .name = "pc98-sys",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = pc98_sys_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(cal_mode, Pc98SysState),
+        VMSTATE_UINT8(cal_port, Pc98SysState),
+        VMSTATE_UINT8(cal_cmd, Pc98SysState),
+        VMSTATE_UINT64(cal_out, Pc98SysState),
+        VMSTATE_UINT64(cal_shift, Pc98SysState),
+        VMSTATE_UINT8(cal_shift_count, Pc98SysState),
+        VMSTATE_UINT8(cal_cmd_shift, Pc98SysState),
+        VMSTATE_INT64(rtc_offset, Pc98SysState),
+        VMSTATE_UINT8(tick_mode, Pc98SysState),
+        VMSTATE_UINT8(tick_count, Pc98SysState),
+        VMSTATE_UINT8(hrtime_count, Pc98SysState),
+        VMSTATE_BOOL(hrtime_initialized, Pc98SysState),
+        VMSTATE_BOOL(tick_irq_level, Pc98SysState),
+        VMSTATE_UINT8(sys_a, Pc98SysState),
+        VMSTATE_UINT8(sys_b, Pc98SysState),
+        VMSTATE_UINT8(sys_c, Pc98SysState),
+        VMSTATE_UINT8(sys_ctrlword, Pc98SysState),
+        VMSTATE_INT32(sys_c_probe, Pc98SysState),
+        VMSTATE_UINT8(prn_a, Pc98SysState),
+        VMSTATE_UINT8(prn_b, Pc98SysState),
+        VMSTATE_UINT8(prn_c, Pc98SysState),
+        VMSTATE_UINT8(prn_ctrlword, Pc98SysState),
+        VMSTATE_UINT8_ARRAY(sdip, Pc98SysState, 24),
+        VMSTATE_UINT8(sdip_bank, Pc98SysState),
+        VMSTATE_TIMER_PTR(tick_timer, Pc98SysState),
+        VMSTATE_INT64(timestamp_origin, Pc98SysState),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static void pc98_sys_realize(DeviceState *dev, Error **errp)
 {
@@ -594,11 +645,11 @@ static void pc98_sys_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = pc98_sys_realize;
+    dc->vmsd = &vmstate_pc98_sys;
     device_class_set_legacy_reset(dc, pc98_sys_reset);
     device_class_set_props(dc, pc98_sys_properties);
     /* Wired by board code (IRQ 15), not user creatable */
     dc->user_creatable = false;
-    /* TODO: migration support (vmstate) */
 }
 
 static const TypeInfo pc98_sys_info = {

@@ -40,6 +40,9 @@
 	.equ	CALENDAR_CMD,	0x0020
 	.equ	CALENDAR_MODE,	0x0022
 	.equ	SYSPPI_PORT_B,	0x0033
+	.equ	PRINTER_DATA,	0x0040
+	.equ	PRINTER_STATUS,	0x0042
+	.equ	PRINTER_CONTROL, 0x0046
 	.equ	FDC_MSR,	0x0090
 	.equ	FDC_FIFO,	0x0092
 	.equ	FDC_CTRL,	0x0094
@@ -73,6 +76,19 @@
 	.equ	TIMER_COUNT,	0x058a
 	.equ	BEEP_COUNT,	0x058c
 	.equ	TIMER_ACTIVE,	0x058e
+	.equ	POST_BOOT_POLICY, 0x05cf	/* 0 auto, 1 floppy, 2 IDE */
+	/*
+	 * Private high-resolution event-timer work area.  Four simultaneous
+	 * requests are sufficient for the firmware consumers exercised here;
+	 * each ten-byte slot holds PB offset/segment, current/reload counts,
+	 * and the one-shot/repeated mode.  This lies in the BIOS-owned reserved
+	 * portion of the 0400h..05ffh system common area.
+	 */
+	.equ	TIMER_EVENT_DUE,	0x05d0
+	.equ	TIMER_EVENT_ACTIVE,	0x05d1
+	.equ	TIMER_EVENT_SLOTS,	0x05d2
+	.equ	TIMER_EVENT_SLOT_SIZE,	10
+	.equ	TIMER_EVENT_SLOT_COUNT,	4
 	.equ	SYSTEM_FLAGS,	0x0500
 
 	.macro	set_vector number, handler
@@ -154,6 +170,10 @@ cold_start:
 	movw	%ax, %es
 	movw	%ax, %fs
 	movw	%ax, %gs
+	movb	%al, POST_BOOT_POLICY
+	movw	$TIMER_EVENT_DUE, %di
+	movw	$(2 + TIMER_EVENT_SLOT_SIZE * TIMER_EVENT_SLOT_COUNT), %cx
+	rep	stosb
 
 	/*
 	 * Undo the temporary flat-segment and A20 state used by the free ITF's
@@ -273,6 +293,7 @@ cold_start:
 	 * on the host CPU's execution speed.
 	 */
 	call	post_memory_message
+	call	post_diagnostics_message
 	movw	$10, %cx		/* 100-ms power-on tone */
 	movw	$880, %dx
 	movb	$0x06, %ah
@@ -289,21 +310,29 @@ cold_start:
 	hlt
 	jmp	1b
 2:
+	call	post_setup_check
 
 	/*
 	 * Prefer an inserted floppy, as the original firmware does.  fdd_boot
 	 * distinguishes the native 1.2-MiB (1024-byte sectors) format from the
 	 * later 1.44-MiB format using the N byte returned by the uPD765A.
 	 */
+boot_retry:
+	cmpb	$2, POST_BOOT_POLICY
+	je	1f
 	call	fdd_boot
+	cmpb	$1, POST_BOOT_POLICY
+	je	boot_failed
 
 	/* The IDE ROM reads two IPL sectors and far-calls 1FC0:0000. */
+1:
 	lcall	$0xd800, $0x0015
 
 boot_failed:
-	cli
-	hlt
-	jmp	boot_failed
+	call	post_boot_error
+	movb	$0x00, %ah
+	int	$0x18
+	jmp	boot_retry
 
 /*
  * Select the internal IDE option ROM in the D8000 window.
@@ -505,6 +534,129 @@ post_memory_message:
 	popw	%ax
 	ret
 
+post_diagnostics_message:
+	pushw	%ax
+	pushw	%si
+	pushw	%di
+	pushw	%es
+	movw	$0xa000, %ax
+	movw	%ax, %es
+	movw	$160, %di
+	movw	$(post_diagnostics_text - FD80_FILE_BASE), %si
+	call	post_puts
+	popw	%es
+	popw	%di
+	popw	%si
+	popw	%ax
+	ret
+
+/*
+ * TAB during the one-second POST banner opens a small, non-persistent boot
+ * setup.  QEMU device properties remain the persistent source of hardware
+ * configuration; this selector only chooses auto, floppy-only, or IDE-only
+ * boot for the current reset.
+ */
+post_setup_check:
+	pushw	%ax
+	pushw	%bx
+	pushw	%si
+	pushw	%di
+	pushw	%es
+	cmpb	$0, KB_COUNT
+	je	9f
+	movw	KB_HEAD, %si
+	cmpb	$0x0f, 1(%si)		/* TAB scan code */
+	jne	9f
+	call	key_dequeue
+	call	post_clear_screen
+	movw	$0xa000, %ax
+	movw	%ax, %es
+	xorw	%di, %di
+	movw	$(post_setup_title - FD80_FILE_BASE), %si
+	call	post_puts
+	movw	$320, %di
+	movw	$(post_setup_diag - FD80_FILE_BASE), %si
+	call	post_puts
+	movw	$640, %di
+	movw	$(post_setup_auto - FD80_FILE_BASE), %si
+	call	post_puts
+	movw	$800, %di
+	movw	$(post_setup_floppy - FD80_FILE_BASE), %si
+	call	post_puts
+	movw	$960, %di
+	movw	$(post_setup_ide - FD80_FILE_BASE), %si
+	call	post_puts
+1:
+	sti
+	cmpb	$0, KB_COUNT
+	jne	2f
+	hlt
+	jmp	1b
+2:
+	call	key_dequeue
+	cmpb	$'1', %al
+	je	3f
+	cmpb	$'2', %al
+	je	4f
+	cmpb	$'3', %al
+	jne	1b
+	movb	$2, POST_BOOT_POLICY
+	jmp	5f
+3:
+	movb	$0, POST_BOOT_POLICY
+	jmp	5f
+4:
+	movb	$1, POST_BOOT_POLICY
+5:
+	call	post_clear_screen
+9:
+	popw	%es
+	popw	%di
+	popw	%si
+	popw	%bx
+	popw	%ax
+	ret
+
+post_boot_error:
+	pushw	%ax
+	pushw	%si
+	pushw	%di
+	pushw	%es
+	call	post_clear_screen
+	movw	$0xa000, %ax
+	movw	%ax, %es
+	movw	$160, %di
+	movw	$(post_boot_error_text - FD80_FILE_BASE), %si
+	call	post_puts
+	movw	$480, %di
+	movw	$(post_boot_retry_text - FD80_FILE_BASE), %si
+	call	post_puts
+	popw	%es
+	popw	%di
+	popw	%si
+	popw	%ax
+	ret
+
+post_clear_screen:
+	pushw	%ax
+	pushw	%cx
+	pushw	%di
+	pushw	%es
+	movw	$0xa000, %ax
+	movw	%ax, %es
+	xorw	%di, %di
+	movw	$2000, %cx
+1:
+	movw	$0x0020, %es:(%di)
+	movb	$0xe1, %es:0x2000(%di)
+	addw	$2, %di
+	loop	1b
+	popw	%es
+	popw	%di
+	popw	%cx
+	popw	%ax
+	ret
+
 post_puts:
 	movb	%cs:(%si), %al
 	incw	%si
@@ -526,6 +678,22 @@ post_memory_prefix:
 	.asciz	"MEMORY 640KB + "
 post_memory_suffix:
 	.asciz	"KB OK"
+post_diagnostics_text:
+	.asciz	"BIOS DIAGNOSTICS OK   TAB: SETUP"
+post_setup_title:
+	.asciz	"PC-98 COMPATIBILITY BIOS SETUP"
+post_setup_diag:
+	.asciz	"MEMORY / FDC / IDE BIOS: READY"
+post_setup_auto:
+	.asciz	"1  AUTO BOOT"
+post_setup_floppy:
+	.asciz	"2  FLOPPY BOOT ONLY"
+post_setup_ide:
+	.asciz	"3  IDE BOOT ONLY"
+post_boot_error_text:
+	.asciz	"BOOT ERROR: NO BOOTABLE FLOPPY OR IDE DISK"
+post_boot_retry_text:
+	.asciz	"INSERT MEDIA AND PRESS RETURN TO RETRY"
 
 post_delay_done:
 	iret
@@ -687,6 +855,7 @@ timer_irq:
 	movb	$0x07, %al		/* system-PPI port C bit 3 set: off */
 	outb	%al, $0x37
 1:
+	call	timer_events_tick
 	cmpb	$0, TIMER_ACTIVE
 	je	timer_no_single
 	decw	TIMER_COUNT
@@ -695,6 +864,8 @@ timer_no_single:
 	cmpb	$0, TIMER_ACTIVE
 	jne	timer_continue
 	cmpw	$0, BEEP_COUNT
+	jne	timer_continue
+	cmpb	$0, TIMER_EVENT_ACTIVE
 	jne	timer_continue
 
 	/*
@@ -706,24 +877,25 @@ timer_no_single:
 	 * window was the visible symptom).  Explicit BIOS one-shots still mask
 	 * the line in timer_expired before invoking their callback.
 	 */
-	popw	%ds
 	cli
 	movb	$0x20, %al
 	outb	%al, $PIC1_CMD
 	outb	%al, $0x5f
 	sti
+	call	timer_events_dispatch
+	popw	%ds
 	popw	%ax
 	iret
 
 timer_continue:
-	popw	%ds
 	cli
 	movb	$0x20, %al
 	outb	%al, $PIC1_CMD
 	outb	%al, $0x5f
+	call	timer_program_10ms
 	sti
-	movb	$0x03, %ah
-	int	$0x1c
+	call	timer_events_dispatch
+	popw	%ds
 	popw	%ax
 	iret
 
@@ -738,6 +910,8 @@ timer_expired:
 	movb	$0, TIMER_ACTIVE
 	cmpw	$0, BEEP_COUNT
 	jne	1f
+	cmpb	$0, TIMER_EVENT_ACTIVE
+	jne	1f
 	inb	$PIC1_DATA, %al
 	orb	$0x01, %al
 	outb	%al, $0x5f
@@ -747,6 +921,7 @@ timer_expired:
 	outb	%al, $PIC1_CMD
 	outb	%al, $0x5f
 	sti
+	call	timer_events_dispatch
 	popw	%ds
 	popw	%ax
 	int	$0x07
@@ -754,9 +929,8 @@ timer_expired:
 
 /*
  * Continue the 10-ms interval by loading channel 0 with 24576
- * (2.4576 MHz / 100), and unmask IRQ0.  The hardware IRQ deliberately
- * reaches this helper through AH=03h, INT 1Ch so that an OS hook on the
- * timer BIOS vector remains in the chain.
+ * (2.4576 MHz / 100), and unmask IRQ0.  This is an internal helper:
+ * public AH=03h is the high-resolution event-cancel service.
  */
 timer_program_10ms:
 	pushw	%ax
@@ -768,6 +942,102 @@ timer_program_10ms:
 	andb	$0xfe, %al
 	outb	%al, $0x5f
 	outb	%al, $PIC1_DATA
+	popw	%ax
+	ret
+
+/*
+ * Advance the four high-resolution event slots by one 10-ms tick.  The
+ * callbacks are deferred until after the PIC has been acknowledged so a
+ * slow guest handler cannot hold IRQ0 asserted.
+ */
+timer_events_tick:
+	pushw	%ax
+	pushw	%bx
+	pushw	%cx
+	pushw	%si
+	movw	$TIMER_EVENT_SLOTS, %si
+	movw	$TIMER_EVENT_SLOT_COUNT, %cx
+	movb	$1, %bl
+1:
+	cmpb	$0, 8(%si)
+	je	3f
+	cmpw	$0, 4(%si)
+	je	3f
+	decw	4(%si)
+	jne	3f
+	orb	%bl, TIMER_EVENT_DUE
+	cmpb	$2, 8(%si)		/* repeated event */
+	jne	3f
+	movw	6(%si), %ax
+	movw	%ax, 4(%si)
+3:
+	shlb	$1, %bl
+	addw	$TIMER_EVENT_SLOT_SIZE, %si
+	loop	1b
+	popw	%si
+	popw	%cx
+	popw	%bx
+	popw	%ax
+	ret
+
+/*
+ * Deliver due callbacks with an interrupt-compatible stack frame.  Event
+ * handlers return with IRET and use AH=ffh to retain a repeated event or
+ * AH=00h to stop it.  A one-shot slot is released before entry so the
+ * callback may immediately reuse its parameter block.
+ */
+timer_events_dispatch:
+	pushw	%ax
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+	pushw	%si
+	pushw	%di
+	pushw	%es
+	movb	TIMER_EVENT_DUE, %dl
+	testb	%dl, %dl
+	jz	5f
+	movw	$TIMER_EVENT_SLOTS, %si
+	movw	$TIMER_EVENT_SLOT_COUNT, %cx
+	movb	$1, %dh
+1:
+	testb	%dh, %dl
+	jz	4f
+	movb	%dh, %al
+	notb	%al
+	andb	%al, TIMER_EVENT_DUE
+	movzbw	8(%si), %di
+	testw	%di, %di
+	jz	4f
+	movw	(%si), %bx
+	movw	2(%si), %ax
+	movw	%ax, %es
+	cmpw	$1, %di
+	jne	2f
+	movb	$0, 8(%si)
+	decb	TIMER_EVENT_ACTIVE
+2:
+	pushf
+	lcall	*%es:8(%bx)
+	cmpw	$2, %di
+	jne	4f
+	cmpb	$0xff, %ah
+	je	4f
+	cmpb	$0, 8(%si)		/* callback may have cancelled itself */
+	je	4f
+	movb	$0, 8(%si)
+	decb	TIMER_EVENT_ACTIVE
+4:
+	shlb	$1, %dh
+	addw	$TIMER_EVENT_SLOT_SIZE, %si
+	loop	1b
+5:
+	popw	%es
+	popw	%di
+	popw	%si
+	popw	%dx
+	popw	%cx
+	popw	%bx
 	popw	%ax
 	ret
 
@@ -913,6 +1183,12 @@ int18:
 	je	int18_key_poll
 	cmpb	$0x06, %ah
 	je	int18_buffer_reset
+	cmpb	$0x07, %ah
+	je	int18_shift_key_wait
+	cmpb	$0x08, %ah
+	je	int18_shift_key_peek
+	cmpb	$0x09, %ah
+	je	int18_make_key_data
 	cmpb	$0x0a, %ah
 	je	int18_mode_set
 	cmpb	$0x0b, %ah
@@ -1004,6 +1280,84 @@ int18_buffer_reset:
 	movb	$0, KB_COUNT
 	movw	$KB_BUF, KB_HEAD
 	movw	$KB_BUF, KB_TAIL
+	jmp	int18_return
+
+/*
+ * Extended keyboard calls documented by the PC-9800 BIOS reference.
+ * AH=07h consumes a key (and waits just like AH=00h), while AH=08h only
+ * senses the head of the queue.  Both return the shift snapshot in BL.
+ */
+int18_shift_key_wait:
+	sti
+1:
+	cmpb	$0, KB_COUNT
+	jne	2f
+	hlt
+	jmp	1b
+2:
+	call	key_dequeue
+	movb	KB_SHIFT, %bl
+	jmp	int18_return
+
+int18_shift_key_peek:
+	pushw	%si
+	xorw	%ax, %ax
+	cmpb	$0, KB_COUNT
+	je	1f
+	movw	KB_HEAD, %si
+	movw	(%si), %ax
+1:
+	movb	KB_SHIFT, %bl
+	popw	%si
+	jmp	int18_return
+
+/*
+ * AH=09h creates the BIOS key-data pair from AL=scan code and BL=shift
+ * state without touching the queue.  The table is deliberately the same
+ * conservative common-key subset used by the IRQ path.
+ */
+int18_make_key_data:
+	pushw	%bx
+	pushw	%si
+	pushw	%dx
+	movb	%bl, %dl
+	movb	%al, %ah
+	xorb	%al, %al
+	movb	%ah, %bl
+	andb	$0x7f, %bl
+	cmpb	$(ascii_table_end - ascii_table), %bl
+	jae	3f
+	xorb	%bh, %bh
+	movw	%bx, %si
+	movb	%cs:(ascii_table - FD80_FILE_BASE)(%si), %al
+
+	/* Either PC-98 SHIFT key is represented by bit zero in this BIOS. */
+	testb	$0x01, %dl
+	jz	1f
+	cmpb	$'a', %al
+	jb	1f
+	cmpb	$'z', %al
+	ja	1f
+	subb	$('a' - 'A'), %al
+1:
+	/* CTRL is bit four, matching the direct state maintained by IRQ1. */
+	testb	$0x10, %dl
+	jz	3f
+	cmpb	$'a', %al
+	jb	2f
+	cmpb	$'z', %al
+	jbe	4f
+2:
+	cmpb	$'A', %al
+	jb	3f
+	cmpb	$'_', %al
+	ja	3f
+4:
+	andb	$0x1f, %al
+3:
+	popw	%dx
+	popw	%si
+	popw	%bx
 	jmp	int18_return
 
 int18_mode_set:
@@ -1511,20 +1865,77 @@ int1a:
 	.fill	0x19 - (. - int1a), 1, 0x90
 int1a_legacy_entry:
 	/*
-	 * The NEC dispatcher accepts AH=00h..1Fh here and returns through
-	 * POP DX, POP DS, IRET.  NEC DOS's temporary INT 1Ah wrapper enters the
-	 * fixed +19h entry after PUSH DS, PUSH DX; restoring them in the wrong
-	 * order leaves DS equal to the caller's DX and redirects its following
-	 * IVT writes away from low memory.  AH=10h is sufficient for bootstrap;
-	 * preserve that calling convention for all unimplemented functions.
+	 * NEC DOS's temporary INT 1Ah wrapper enters this fixed +19h entry
+	 * after PUSH DS, PUSH DX.  Preserve that two-word private calling
+	 * convention while implementing the documented printer calls.
 	 */
 	cmpb	$0x10, %ah
-	jne	1f
-	xorb	%ah, %ah
+	je	int1a_printer_init
+	cmpb	$0x11, %ah
+	je	int1a_printer_write
+	cmpb	$0x12, %ah
+	je	int1a_printer_status
+	cmpb	$0x14, %ah
+	je	int1a_printer_write
+	cmpb	$0x15, %ah
+	je	int1a_printer_write
+	cmpb	$0x16, %ah
+	je	int1a_printer_init
+	cmpb	$0x30, %ah
+	je	int1a_printer_write_buffer
+	jmp	int1a_legacy_return
+
+int1a_printer_init:
+	/*
+	 * Normal-mode 8255: port A output, port B input, port C output.
+	 * Keep PSTB inactive after mode selection.  The emulated PPI latches
+	 * the data even when no host printer backend is configured.
+	 */
+	movw	$PRINTER_CONTROL, %dx
+	movb	$0x82, %al
+	outb	%al, %dx
+	movb	$0x07, %al		/* port-C bit 3 set: PSTB inactive */
+	outb	%al, %dx
+	movb	$0x01, %ah		/* data transmission possible */
+	jmp	int1a_legacy_return
+
+int1a_printer_write:
+	call	printer_write_byte
+	movb	$0x01, %ah
+	jmp	int1a_legacy_return
+
+int1a_printer_status:
+	movb	$0x01, %ah
+	jmp	int1a_legacy_return
+
+int1a_printer_write_buffer:
+	jcxz	2f
 1:
+	movb	%es:(%bx), %al
+	call	printer_write_byte
+	incw	%bx
+	loop	1b
+2:
+	xorb	%ah, %ah
+
+int1a_legacy_return:
 	popw	%dx
 	popw	%ds
 	iret
+
+printer_write_byte:
+	pushw	%ax
+	pushw	%dx
+	movw	$PRINTER_DATA, %dx
+	outb	%al, %dx
+	movw	$PRINTER_CONTROL, %dx
+	movb	$0x06, %al		/* PSTB active */
+	outb	%al, %dx
+	movb	$0x07, %al		/* PSTB inactive */
+	outb	%al, %dx
+	popw	%dx
+	popw	%ax
+	ret
 
 int1a_pci:
 	/*
@@ -1645,6 +2056,14 @@ fdd_int1b:
 	je	fdd_int1b_sense
 	cmpb	$0x06, %al
 	je	fdd_int1b_read
+	cmpb	$0x05, %al
+	je	fdd_int1b_write
+	cmpb	$0x07, %al
+	je	fdd_int1b_recalibrate
+	cmpb	$0x0a, %al
+	je	fdd_int1b_read_id
+	cmpb	$0x0d, %al
+	je	fdd_int1b_format
 	jmp	fdd_int1b_bad_command
 
 fdd_int1b_init:
@@ -1654,16 +2073,56 @@ fdd_int1b_init:
 	jmp	fdd_int1b_success
 
 fdd_int1b_sense:
-	movw	$FDC_CTRL, %dx
-	inb	%dx, %al
-	testb	$0x10, %al
-	jz	fdd_int1b_not_ready
-	movw	$512, -4(%bp)
 	movb	-2(%bp), %al
-	andb	$0xf0, %al
-	cmpb	$0x30, %al
-	je	fdd_int1b_success
-	movw	$1024, -4(%bp)
+	call	fdd_initialize
+	jc	fdd_int1b_not_ready
+	movb	-2(%bp), %al
+	call	fdd_read_id
+	jc	fdd_int1b_not_ready
+	cmpb	$3, %ch
+	ja	fdd_int1b_io_error
+	/*
+	 * The plain SENSE form returns ready (01h).  NEC DOS uses the high-bit
+	 * media-check form (C4h) and expects 0Dh for a 2HD medium; returning
+	 * only 01h makes it classify a 1.44-MiB disk as an incompatible format.
+	 * BX is preserved in both forms.
+	 */
+	testb	$0x80, -1(%bp)
+	jz	1f
+	movb	$0x0d, -1(%bp)
+	jmp	2f
+1:
+	movb	$0x01, -1(%bp)
+2:
+	andw	$0xfffe, 6(%bp)
+	jmp	fdd_int1b_return
+
+fdd_int1b_recalibrate:
+	movb	-2(%bp), %al
+	call	fdd_initialize
+	jc	fdd_int1b_not_ready
+	movb	-2(%bp), %al
+	call	fdd_recalibrate
+	jc	fdd_int1b_io_error
+	jmp	fdd_int1b_success
+
+fdd_int1b_read_id:
+	movb	-2(%bp), %al
+	call	fdd_initialize
+	jc	fdd_int1b_not_ready
+	testb	$0x10, -1(%bp)		/* public SEEK bit */
+	jz	1f
+	movb	-6(%bp), %bl		/* requested cylinder */
+	movb	-7(%bp), %dh		/* requested head */
+	movb	-2(%bp), %al
+	call	fdd_seek_track
+	jc	fdd_int1b_io_error
+1:
+	movb	-2(%bp), %al
+	call	fdd_read_id
+	jc	fdd_int1b_io_error
+	movw	%cx, -6(%bp)		/* CH=N, CL=C */
+	movw	%dx, -8(%bp)		/* DH=H, DL=R */
 	jmp	fdd_int1b_success
 
 fdd_int1b_read:
@@ -1679,39 +2138,127 @@ fdd_int1b_read:
 	movw	-8(%bp), %dx		/* original DH=head, DL=sector */
 	movw	$512, %cx
 	cmpb	$2, %bh
-	jne	2f
-	movb	$15, %ah
-	movb	-2(%bp), %al
-	andb	$0xf0, %al
-	cmpb	$0x30, %al
-	jne	1f
-	movb	$18, %ah
+	ja	4f
+	movb	$2, %bh		/* NEC BIOS normalizes partial calls to N=2 */
 	jmp	1f
-2:
-	movw	$1024, %cx
-	movb	$8, %ah
+4:
+	shlw	$1, %cx
 	cmpb	$3, %bh
 	jne	fdd_int1b_bad_parameter
+	movb	$8, %ah
+	jmp	2f
 1:
+	movb	$18, %ah
+2:
+	testb	$0x10, -1(%bp)		/* public SEEK bit */
+	jz	3f
+	movb	-2(%bp), %al
+	call	fdd_seek_track
+	jc	fdd_int1b_io_error
+3:
 	testw	%si, %si
 	jz	fdd_int1b_success
-	cmpw	%cx, %si
-	jb	fdd_int1b_bad_parameter
+	movb	-2(%bp), %al
 	call	fdd_read_one
 	jc	fdd_int1b_io_error
+	cmpw	%cx, %si
+	jbe	fdd_int1b_success
 	subw	%cx, %si
-	jz	fdd_int1b_success
 
 	/* Advance CHS according to the selected physical format. */
 	incb	%dl
 	cmpb	%ah, %dl
-	jbe	1b
+	jbe	2b
 	movb	$1, %dl
 	xorb	$1, %dh
 	testb	%dh, %dh
-	jnz	1b
+	jnz	2b
 	incb	%bl
-	jmp	1b
+	jmp	2b
+
+fdd_int1b_write:
+	movb	-2(%bp), %al
+	call	fdd_initialize
+	jc	fdd_int1b_not_ready
+
+	/* ES:BP is the public buffer; BX is its byte count. */
+	movw	0(%bp), %di
+	movw	-4(%bp), %si
+	movb	-5(%bp), %bh		/* original CH: sector-size code N */
+	movb	-6(%bp), %bl		/* original CL: cylinder */
+	movw	-8(%bp), %dx		/* original DH=head, DL=sector */
+	movw	$512, %cx
+	cmpb	$2, %bh
+	ja	4f
+	movb	$2, %bh
+	jmp	1f
+4:
+	shlw	$1, %cx
+	cmpb	$3, %bh
+	jne	fdd_int1b_bad_parameter
+	movb	$8, %ah
+	jmp	2f
+1:
+	movb	$18, %ah
+2:
+	testb	$0x10, -1(%bp)
+	jz	3f
+	movb	-2(%bp), %al
+	call	fdd_seek_track
+	jc	fdd_int1b_io_error
+3:
+	testw	%si, %si
+	jz	fdd_int1b_success
+	movb	-2(%bp), %al
+	call	fdd_write_one
+	jc	fdd_int1b_io_error
+	cmpw	%cx, %si
+	jbe	fdd_int1b_success
+	subw	%cx, %si
+
+	incb	%dl
+	cmpb	%ah, %dl
+	jbe	2b
+	movb	$1, %dl
+	xorb	$1, %dh
+	testb	%dh, %dh
+	jnz	2b
+	incb	%bl
+	jmp	2b
+
+fdd_int1b_format:
+	movb	-2(%bp), %al
+	call	fdd_initialize
+	jc	fdd_int1b_not_ready
+
+	movw	0(%bp), %di		/* ES:caller BP -> CHRN table */
+	movw	-4(%bp), %si		/* caller BX -> table byte count */
+	movb	-5(%bp), %bh		/* original CH -> N */
+	movb	-6(%bp), %bl		/* original CL -> cylinder */
+	movw	-8(%bp), %dx		/* original DH=head, DL=fill byte */
+	movb	$15, %ah
+	cmpb	$2, %bh
+	jne	1f
+	movb	-2(%bp), %al
+	andb	$0xf0, %al
+	cmpb	$0x30, %al
+	jne	2f
+	movb	$18, %ah
+	jmp	2f
+1:
+	movb	$8, %ah
+	cmpb	$3, %bh
+	jne	fdd_int1b_bad_parameter
+2:
+	xorw	%cx, %cx
+	movb	%ah, %cl
+	shlw	$2, %cx
+	cmpw	%cx, %si
+	jb	fdd_int1b_bad_parameter
+	movb	-2(%bp), %al
+	call	fdd_format_one
+	jc	fdd_int1b_io_error
+	jmp	fdd_int1b_success
 
 fdd_int1b_success:
 	movb	$0x00, -1(%bp)
@@ -1762,15 +2309,17 @@ fdd_initialize:
 	outb	%al, %dx
 
 	movw	$FDC_MODE144, %dx
-	movb	$0x10, %al		/* enable programming, drive 0, 1.2 MiB */
+	andb	$0x03, %al
+	shlb	$5, %al
+	orb	$0x10, %al		/* enable programming, selected drive */
 	cmpb	$0x30, %ah
 	jne	1f
-	orb	$0x01, %al		/* drive 0, 1.44 MiB */
+	orb	$0x01, %al		/* selected drive, 1.44 MiB */
 1:
 	outb	%al, %dx
 
 	movw	$FDC_CTRL, %dx
-	movb	$0xb8, %al		/* nRESET, IRQ/DMA gates, motor */
+	movb	$0x88, %al		/* nRESET and motor; polled PIO, no IRQ/DMA */
 	outb	%al, %dx
 
 	movb	$0x03, %al		/* SPECIFY */
@@ -1787,6 +2336,125 @@ fdd_initialize:
 	ret
 
 /*
+ * Read the physical ID of the currently inserted medium.
+ *
+ * Input: AL=public unit.  Output: CH=N, CL=C, DH=H, DL=R, CF status.
+ * READ ID is used by
+ * SENSE so a 1.44-MiB disk in a 1-MiB-interface drive reports 512-byte
+ * sectors instead of being mistaken for the traditional 1024-byte format.
+ */
+fdd_read_id:
+	pushw	%bp
+	movw	%sp, %bp
+	pushw	%ax
+	pushw	%bx
+
+	movb	$0x4a, %al		/* READ ID, MFM */
+	call	fdd_fifo_write
+	jc	fdd_read_id_done
+	movb	-2(%bp), %al
+	andb	$0x03, %al
+	call	fdd_fifo_write
+	jc	fdd_read_id_done
+
+	call	fdd_fifo_read
+	jc	fdd_read_id_done
+	movb	%al, %bl		/* ST0 */
+	call	fdd_fifo_read		/* ST1 */
+	jc	fdd_read_id_done
+	call	fdd_fifo_read		/* ST2 */
+	jc	fdd_read_id_done
+	call	fdd_fifo_read		/* C */
+	jc	fdd_read_id_done
+	movb	%al, %cl
+	call	fdd_fifo_read		/* H */
+	jc	fdd_read_id_done
+	movb	%al, %dh
+	call	fdd_fifo_read		/* R */
+	jc	fdd_read_id_done
+	movb	%al, %dl
+	call	fdd_fifo_read
+	jc	fdd_read_id_done
+	movb	%al, %ch		/* N */
+	testb	$0xc0, %bl
+	jz	1f
+	stc
+	jmp	fdd_read_id_done
+1:
+	clc
+fdd_read_id_done:
+	popw	%bx
+	popw	%ax
+	popw	%bp
+	ret
+
+/*
+ * Complete a seek-like command by polling SENSE INTERRUPT STATUS.  The
+ * public BIOS uses polled PIO, so the PC-98 interrupt gate remains closed.
+ */
+fdd_sense_interrupt:
+	pushw	%bx
+	movb	$0x08, %al
+	call	fdd_fifo_write
+	jc	2f
+	call	fdd_fifo_read		/* ST0 */
+	jc	2f
+	movb	%al, %bl
+	call	fdd_fifo_read		/* present cylinder */
+	jc	2f
+	testb	$0xc0, %bl
+	jnz	2f
+	clc
+	jmp	3f
+2:
+	stc
+3:
+	popw	%bx
+	ret
+
+/* Input AL=public unit. */
+fdd_recalibrate:
+	pushw	%ax
+	pushw	%cx
+	movb	%al, %cl
+	movb	$0x07, %al
+	call	fdd_fifo_write
+	jc	1f
+	movb	%cl, %al
+	andb	$0x03, %al
+	call	fdd_fifo_write
+	jc	1f
+	call	fdd_sense_interrupt
+1:
+	popw	%cx
+	popw	%ax
+	ret
+
+/* Input AL=public unit, BL=cylinder, DH=head. */
+fdd_seek_track:
+	pushw	%ax
+	pushw	%cx
+	movb	%al, %cl
+	movb	$0x0f, %al
+	call	fdd_fifo_write
+	jc	1f
+	movb	%dh, %al
+	shlb	$2, %al
+	movb	%cl, %ah
+	andb	$0x03, %ah
+	orb	%ah, %al
+	call	fdd_fifo_write
+	jc	1f
+	movb	%bl, %al
+	call	fdd_fifo_write
+	jc	1f
+	call	fdd_sense_interrupt
+1:
+	popw	%cx
+	popw	%ax
+	ret
+
+/*
  * Read one physical sector.
  *
  * Inputs: BL=C, BH=N, DH=H, DL=R, AH=EOT, CX=byte count, ES:DI=buffer.
@@ -1799,12 +2467,16 @@ fdd_read_one:
 	pushw	%bx
 	pushw	%cx
 	pushw	%dx
+	pushw	%si
 
 	movb	$0x46, %al		/* READ DATA, MFM, single track */
 	call	fdd_fifo_write
 	jc	fdd_read_one_done
 	movb	%dh, %al
 	shlb	$2, %al		/* head plus drive 0 */
+	movb	-2(%bp), %ah
+	andb	$0x03, %ah
+	orb	%ah, %al
 	call	fdd_fifo_write
 	jc	fdd_read_one_done
 	movb	%bl, %al
@@ -1819,13 +2491,22 @@ fdd_read_one:
 	movb	%bh, %al
 	call	fdd_fifo_write
 	jc	fdd_read_one_done
-	movb	-1(%bp), %al
+	/*
+	 * With PIO there is no DMA terminal-count signal to stop the command.
+	 * End this command at the requested sector; the outer BIOS loop advances
+	 * CHS for multi-sector requests.
+	 */
+	movb	%dl, %al
 	call	fdd_fifo_write
 	jc	fdd_read_one_done
 	movb	$0x1b, %al		/* GPL */
 	call	fdd_fifo_write
 	jc	fdd_read_one_done
-	movb	$0xff, %al		/* DTL (unused for N != 0) */
+	movb	$0xff, %al
+	testb	%bh, %bh
+	jnz	6f
+	movb	%cl, %al		/* DTL is meaningful when N == 0 */
+6:
 	call	fdd_fifo_write
 	jc	fdd_read_one_done
 
@@ -1851,7 +2532,14 @@ fdd_read_one:
 1:
 	call	fdd_fifo_read
 	jc	fdd_read_one_done
+	testw	%si, %si
+	jz	4f
 	stosb
+	decw	%si
+	jmp	5f
+4:
+	/* The public DTL may stop in mid-sector; drain the physical remainder. */
+5:
 	loop	1b
 
 	/* Seven result bytes: remember ST0 and return the final N byte. */
@@ -1872,10 +2560,168 @@ fdd_read_one:
 3:
 	clc
 fdd_read_one_done:
+	popw	%si
 	popw	%dx
 	popw	%cx
 	popw	%bx
 	movb	-1(%bp), %ah
+	movw	%bp, %sp
+	popw	%bp
+	ret
+
+/*
+ * Write one physical sector.
+ *
+ * Inputs are the same as fdd_read_one, with ES:DI as the source buffer and
+ * AL carrying the public unit number.  DI advances by CX.
+ */
+fdd_write_one:
+	pushw	%bp
+	movw	%sp, %bp
+	pushw	%ax			/* EOT/unit at BP-1/BP-2 */
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+	pushw	%si
+
+	movb	$0x45, %al		/* WRITE DATA, MFM, single track */
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+	movb	%dh, %al
+	shlb	$2, %al
+	movb	-2(%bp), %ah
+	andb	$0x03, %ah
+	orb	%ah, %al
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+	movb	%bl, %al
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+	movb	%dh, %al
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+	movb	%dl, %al
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+	movb	%bh, %al
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+	/* See fdd_read_one: one PIO command must end at the current sector. */
+	movb	%dl, %al
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+	movb	$0x1b, %al
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+	movb	$0xff, %al
+	testb	%bh, %bh
+	jnz	6f
+	movb	%cl, %al
+6:
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+
+1:
+	testw	%si, %si
+	jz	4f
+	movb	%es:(%di), %al
+	incw	%di
+	decw	%si
+	jmp	5f
+4:
+	xorb	%al, %al		/* partial-sector writes are zero-filled */
+5:
+	call	fdd_fifo_write
+	jc	fdd_write_one_done
+	loop	1b
+
+	/* Seven result bytes: save ST0 and discard ST1/ST2/C/H/R/N. */
+	call	fdd_fifo_read
+	jc	fdd_write_one_done
+	movb	%al, %bl
+	movw	$6, %cx
+2:
+	call	fdd_fifo_read
+	jc	fdd_write_one_done
+	loop	2b
+	testb	$0xc0, %bl
+	jz	3f
+	stc
+	jmp	fdd_write_one_done
+3:
+	clc
+fdd_write_one_done:
+	popw	%si
+	popw	%dx
+	popw	%cx
+	popw	%bx
+	movb	-1(%bp), %ah
+	movw	%bp, %sp
+	popw	%bp
+	ret
+
+/*
+ * Format one track using the caller's standard CHRN descriptor table.
+ *
+ * Inputs: AL=public unit, AH=sector count, BH=N, DH=head, DL=fill byte,
+ *         CX=descriptor byte count, ES:DI=CHRN table.
+ */
+fdd_format_one:
+	pushw	%bp
+	movw	%sp, %bp
+	pushw	%ax			/* sector count/unit at BP-1/BP-2 */
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+
+	movb	$0x4d, %al		/* FORMAT TRACK, MFM */
+	call	fdd_fifo_write
+	jc	fdd_format_one_done
+	movb	%dh, %al
+	shlb	$2, %al
+	movb	-2(%bp), %ah
+	andb	$0x03, %ah
+	orb	%ah, %al
+	call	fdd_fifo_write
+	jc	fdd_format_one_done
+	movb	%bh, %al
+	call	fdd_fifo_write
+	jc	fdd_format_one_done
+	movb	-1(%bp), %al		/* sectors per track */
+	call	fdd_fifo_write
+	jc	fdd_format_one_done
+	movb	$0x1b, %al		/* GPL */
+	call	fdd_fifo_write
+	jc	fdd_format_one_done
+	movb	%dl, %al		/* fill byte */
+	call	fdd_fifo_write
+	jc	fdd_format_one_done
+
+1:
+	movb	%es:(%di), %al
+	incw	%di
+	call	fdd_fifo_write
+	jc	fdd_format_one_done
+	loop	1b
+
+	call	fdd_fifo_read
+	jc	fdd_format_one_done
+	movb	%al, %bl
+	movw	$6, %cx
+2:
+	call	fdd_fifo_read
+	jc	fdd_format_one_done
+	loop	2b
+	testb	$0xc0, %bl
+	jz	3f
+	stc
+	jmp	fdd_format_one_done
+3:
+	clc
+fdd_format_one_done:
+	popw	%dx
+	popw	%cx
+	popw	%bx
 	movw	%bp, %sp
 	popw	%bp
 	ret
@@ -2045,7 +2891,11 @@ int1c:
 	cmpb	$0x02, %ah
 	je	int1c_set_single_timer
 	cmpb	$0x03, %ah
-	je	int1c_continue_timer
+	je	int1c_cancel_event
+	cmpb	$0x04, %ah
+	je	int1c_set_event
+	cmpb	$0x05, %ah
+	je	int1c_set_event
 	cmpb	$0x06, %ah
 	je	int1c_beep
 	cmpb	$0x80, %ah
@@ -2166,13 +3016,117 @@ int1c_set_single_timer:
 	xorb	%ah, %ah
 	iret
 
-int1c_continue_timer:
-	/*
-	 * AH=03h is the NEC BIOS's private low-resolution "continue" entry.
-	 * High-resolution machines expose the same number as timer cancel, but
-	 * this Xa7-compatible low-resolution path uses it only from IRQ0.
-	 */
+/*
+ * High-resolution event timer.
+ *
+ * AH=04h installs a one-shot event and AH=05h a repeated event.  ES:BX
+ * addresses the caller's twelve-byte parameter block:
+ *
+ *   +0/+2  BIOS link work
+ *   +4     BIOS repeat work
+ *   +6     interval in 10-ms units (0001h..ffffh)
+ *   +8/+10 callback offset/segment
+ *
+ * Four requests may be active at once.  AH=03h cancels the exact ES:BX
+ * block and returns AH=00h, or AH=ffh when it is not queued.
+ */
+int1c_cancel_event:
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+	pushw	%si
+	pushw	%ds
+	movw	%es, %dx
+	xorw	%cx, %cx
+	movw	%cx, %ds
+	movw	$TIMER_EVENT_SLOTS, %si
+	movw	$TIMER_EVENT_SLOT_COUNT, %cx
+1:
+	cmpb	$0, 8(%si)
+	je	2f
+	cmpw	%bx, (%si)
+	jne	2f
+	cmpw	%dx, 2(%si)
+	jne	2f
+	movb	$0, 8(%si)
+	decb	TIMER_EVENT_ACTIVE
+	xorb	%ah, %ah
+	jmp	3f
+2:
+	addw	$TIMER_EVENT_SLOT_SIZE, %si
+	loop	1b
+	movb	$0xff, %ah
+3:
+	popw	%ds
+	popw	%si
+	popw	%dx
+	popw	%cx
+	popw	%bx
+	iret
+
+int1c_set_event:
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+	pushw	%si
+	pushw	%di
+	pushw	%ds
+	movb	%ah, %dl
+	movw	%es, %di
+	xorw	%ax, %ax
+	movw	%ax, %ds
+	cmpw	$0, %es:6(%bx)
+	je	6f
+
+	/* Reusing a queued parameter block updates it in place. */
+	movw	$TIMER_EVENT_SLOTS, %si
+	movw	$TIMER_EVENT_SLOT_COUNT, %cx
+1:
+	cmpb	$0, 8(%si)
+	je	2f
+	cmpw	%bx, (%si)
+	jne	2f
+	cmpw	%di, 2(%si)
+	je	4f
+2:
+	addw	$TIMER_EVENT_SLOT_SIZE, %si
+	loop	1b
+
+	/* Otherwise allocate the first inactive slot. */
+	movw	$TIMER_EVENT_SLOTS, %si
+	movw	$TIMER_EVENT_SLOT_COUNT, %cx
+3:
+	cmpb	$0, 8(%si)
+	je	5f
+	addw	$TIMER_EVENT_SLOT_SIZE, %si
+	loop	3b
+	jmp	6f
+5:
+	incb	TIMER_EVENT_ACTIVE
+4:
+	movw	%bx, (%si)
+	movw	%di, 2(%si)
+	movw	%es:6(%bx), %ax
+	movw	%ax, 4(%si)
+	movw	%ax, 6(%si)
+	movw	$0, %es:(%bx)
+	movw	$0, %es:2(%bx)
+	movw	%ax, %es:4(%bx)
+	movb	%dl, %al
+	subb	$3, %al		/* AH=04h -> 1, AH=05h -> 2 */
+	movb	%al, 8(%si)
 	call	timer_program_10ms
+	xorb	%ah, %ah
+	jmp	7f
+6:
+	movb	$0xff, %ah
+7:
+	popw	%ds
+	popw	%di
+	popw	%si
+	popw	%dx
+	popw	%cx
+	popw	%bx
 	iret
 
 int1c_beep:

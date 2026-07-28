@@ -68,6 +68,7 @@
 #include "system/ioport.h"
 #include "system/memory.h"
 #include "system/reset.h"
+#include "migration/vmstate.h"
 
 /*
  * The firmware ROM is eight 32 KiB banks.  They can be provided either as one
@@ -158,6 +159,7 @@ struct Pc98MemState {
     uint8_t ide_rom_gate;     /* 0x53d bit 4: IDE option ROM visible */
     uint8_t ide_ram_gate;     /* 0x1e8e: IDE work RAM visible */
     uint8_t top_bank;         /* bank currently paged at 0xf8000 */
+    uint32_t top_bank_ram_src; /* RAM alias source selected with top_bank */
     uint8_t bios_ram_gate;    /* 0x53d bit 1: writable BIOS RAM copy */
     uint8_t sys16m;           /* 0x43b: 16 MiB system space enabled */
     uint8_t ide_rom_present;  /* pc98ide.bin was found */
@@ -170,6 +172,7 @@ struct Pc98MemState {
     uint8_t f8e90_value;      /* current IDE probe bitmap (the latch) */
     GPtrArray *cbus_option_roms;
     bool cbus_rom_gate;
+    bool a20_wrap_enabled;
 
     void (*ems_cb)(void *opaque, uint32_t value);
     void *ems_cb_arg;
@@ -286,6 +289,7 @@ static const MemoryRegionOps probe_page_ops = {
 /* apply the state of the 0xf8000 bank window */
 static void mem_apply_top_bank(Pc98MemState *s, uint32_t ram_src)
 {
+    s->top_bank_ram_src = ram_src;
     memory_region_transaction_begin();
 
     memory_region_set_alias_offset(&s->f8000_rom,
@@ -444,6 +448,7 @@ void pc98_mem_set_a20_wrap(void *opaque, bool wrap)
 {
     Pc98MemState *s = opaque;
 
+    s->a20_wrap_enabled = wrap;
     memory_region_set_enabled(&s->a20_wrap, wrap);
 }
 
@@ -934,11 +939,50 @@ static void pc98_mem_reset(void *opaque)
     s->bios_probe_write = 0;
     s->f8e90_value = s->f8e90_reset;
     /* every CPU reset re-masks A20 on PC-98 (see x86_cpu_reset_hold) */
-    memory_region_set_enabled(&s->a20_wrap, true);
+    s->a20_wrap_enabled = true;
+    memory_region_set_enabled(&s->a20_wrap, s->a20_wrap_enabled);
 
     s->top_bank = BANK_ITF;
     mem_apply_top_bank(s, 0xf8000);
 }
+
+static int pc98_mem_post_load(void *opaque, int version_id)
+{
+    Pc98MemState *s = opaque;
+
+    mem_apply_window(s, 0);
+    mem_apply_window(s, 1);
+    mem_apply_sys16m(s);
+    mem_apply_dwin(s);
+    mem_apply_cbus_rom_gate(s, s->cbus_rom_gate);
+    memory_region_set_enabled(&s->e8000_ram, s->bios_ram_gate);
+    mem_apply_top_bank(s, s->top_bank_ram_src);
+    memory_region_set_enabled(&s->a20_wrap, s->a20_wrap_enabled);
+    return 0;
+}
+
+static const VMStateDescription vmstate_pc98_mem = {
+    .name = "pc98-mem",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = pc98_mem_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(win_map, Pc98MemState, 2),
+        VMSTATE_UINT8(dwin_sel, Pc98MemState),
+        VMSTATE_UINT8(ide_rom_gate, Pc98MemState),
+        VMSTATE_UINT8(ide_ram_gate, Pc98MemState),
+        VMSTATE_UINT8(top_bank, Pc98MemState),
+        VMSTATE_UINT32(top_bank_ram_src, Pc98MemState),
+        VMSTATE_UINT8(bios_ram_gate, Pc98MemState),
+        VMSTATE_UINT8(sys16m, Pc98MemState),
+        VMSTATE_UINT8(d000_shadow, Pc98MemState),
+        VMSTATE_UINT8(bios_probe_write, Pc98MemState),
+        VMSTATE_UINT8(f8e90_value, Pc98MemState),
+        VMSTATE_BOOL(cbus_rom_gate, Pc98MemState),
+        VMSTATE_BOOL(a20_wrap_enabled, Pc98MemState),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static void mem_build_window(Pc98MemState *s, int idx, hwaddr base,
                              const Pc98VgaRegions *vga)
@@ -1201,6 +1245,7 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
 
     qemu_register_reset(pc98_mem_reset, s);
     pc98_mem_reset(s);
+    vmstate_register(NULL, 0, &vmstate_pc98_mem, s);
 
     return s;
 }

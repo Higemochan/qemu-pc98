@@ -689,10 +689,19 @@ static int coregraph_post_load(void *opaque, int version_id)
     return 0;
 }
 
+static int coregraph_pre_save(void *opaque)
+{
+    Pc98CoreGraphState *s = opaque;
+
+    /* The shared Cirrus VMState likewise snapshots only between BLTs. */
+    return s->cirrus.cirrus_srccounter ? -EBUSY : 0;
+}
+
 static const VMStateDescription vmstate_pc98_coregraph = {
     .name = "pc98-coregraph",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
+    .pre_save = coregraph_pre_save,
     .post_load = coregraph_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, Pc98CoreGraphState),
@@ -701,6 +710,8 @@ static const VMStateDescription vmstate_pc98_coregraph = {
         VMSTATE_UINT8(index, Pc98CoreGraphState),
         VMSTATE_UINT8_V(video_enable, Pc98CoreGraphState, 2),
         VMSTATE_UINT8_ARRAY(regs, Pc98CoreGraphState, 5),
+        VMSTATE_UINT8_ARRAY_V(cirrus.cirrus_hidden_palette,
+                              Pc98CoreGraphState, 48, 3),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -718,6 +729,33 @@ static bool coregraph_gfx_update(void *opaque)
     uint8_t gr5;
     bool result;
 
+    /*
+     * A Windows full-screen DOS box keeps the Core-Graph function enabled
+     * while re-enabling the native GDC scanout.  Windows leaves several GDC
+     * registers, including the cursor enable, programmed behind its normal
+     * Cirrus desktop; MODE1_DISP is the signal that distinguishes live GDC
+     * output from that preserved state.  Follow the active scanout rather
+     * than transient Cirrus blanking during a mode set.
+     */
+    if (s->primary_vga &&
+        (!s->display_active ||
+         pc98_vga_display_enabled(s->primary_vga))) {
+        return pc98_vga_update_console(s->primary_vga);
+    }
+
+    /*
+     * Switching to the native GDC leaves its 640-pixel-wide surface attached
+     * to the shared console.  If Cirrus is blank when the relay switches
+     * back, generic vga_draw_blank() uses the saved Cirrus width before its
+     * normal mode path has a chance to resize.  Resize here, on the UI refresh
+     * thread, so the first blanking pass cannot overrun each scanline.
+     */
+    if (vga->last_scr_width > 0 && vga->last_scr_height > 0 &&
+        (qemu_console_get_width(vga->con, -1) != vga->last_scr_width ||
+         qemu_console_get_height(vga->con, -1) != vga->last_scr_height)) {
+        qemu_console_resize(vga->con, vga->last_scr_width,
+                            vga->last_scr_height);
+    }
     /*
      * NEC's Windows 95 Core-Graph driver leaves GR05's VGA shift field
      * cleared after selecting an SR07 packed-pixel mode.  The board still
@@ -741,6 +779,9 @@ static void coregraph_invalidate(void *opaque)
     VGACommonState *vga = &s->cirrus.vga;
 
     vga->hw_ops->invalidate(vga);
+    if (s->primary_vga) {
+        pc98_vga_invalidate_console(s->primary_vga);
+    }
 }
 
 static const GraphicHwOps coregraph_hw_ops = {
@@ -760,8 +801,9 @@ static void coregraph_update_display(Pc98CoreGraphState *s)
      * Real PC-9821 systems feed the GDC and Core-Graph outputs through one
      * monitor relay.  ACLMM controls it with fixed-interface register 3 bit
      * 1, while older WAB-compatible drivers use the video-enable latch at
-     * 0xFF82.  Model that relay by changing the producer behind the one QEMU
-     * graphic console instead of exposing two host windows.
+     * 0xFF82.  Keep one stable QEMU console callback and let it dispatch to
+     * the selected producer.  Replacing the callback during a Windows mode
+     * set can strand an in-flight SDL refresh on the old producer.
      */
     active = (s->regs[3] & 0x02) || s->video_enable;
     if (active == s->display_active) {
@@ -769,19 +811,7 @@ static void coregraph_update_display(Pc98CoreGraphState *s)
     }
 
     s->display_active = active;
-    if (active) {
-        qemu_graphic_console_set_hwops(s->cirrus.vga.con,
-                                       &coregraph_hw_ops, s);
-        qemu_console_hw_invalidate(s->cirrus.vga.con);
-    } else {
-        pc98_vga_select_console(s->primary_vga);
-    }
-    /*
-     * Do not update synchronously from this guest I/O callback.  A mode
-     * switch may resize the console, and the Windows SDL backend must resize
-     * its host window on the UI thread.  Let the normal display refresh run
-     * the newly selected producer there.
-     */
+    qemu_console_hw_invalidate(s->cirrus.vga.con);
 }
 
 static void coregraph_init_io_alias(MemoryRegion *alias, Object *owner,
@@ -886,6 +916,7 @@ static void coregraph_realize(PCIDevice *dev, Error **errp)
         c->vga.con = pc98_vga_get_console(s->primary_vga);
         object_property_set_link(OBJECT(c->vga.con), "device", OBJECT(dev),
                                  &error_abort);
+        qemu_graphic_console_set_hwops(c->vga.con, &coregraph_hw_ops, s);
     } else {
         c->vga.con = qemu_graphic_console_create(DEVICE(dev), 0,
                                                   &coregraph_hw_ops, s);

@@ -41,6 +41,7 @@
 #include "system/ioport.h"
 #include "system/memory.h"
 #include "system/reset.h"
+#include "migration/vmstate.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
 #include "trace.h"
@@ -204,6 +205,8 @@ struct VGAState {
     struct GDCState gdc_chr;
     struct GDCState gdc_gfx;
     struct EGCState egc;
+    uint16_t egc_in_offset;
+    uint16_t egc_out_offset;
 
     uint8_t grcg_mode;
     uint8_t grcg_tile_cnt;
@@ -297,6 +300,7 @@ enum {
 
 enum {
     GDC_CMD_RESET    = 0x00,
+    GDC_CMD_STOP     = 0x05,
     GDC_CMD_SYNC     = 0x0e,
     GDC_CMD_SLAVE    = 0x6e,
     GDC_CMD_MASTER   = 0x6f,
@@ -706,7 +710,7 @@ static uint8_t gdc_fifo_read(GDCState *s)
 
 /* command */
 
-static void gdc_cmd_reset(GDCState *s)
+static void gdc_reset(GDCState *s)
 {
     s->sync[6] = 0x90;
     s->sync[7] = 0x01;
@@ -725,6 +729,20 @@ static void gdc_cmd_reset(GDCState *s)
     s->statreg = 0;
     s->cmdreg = -1;
     s->dirty = 0xff;
+}
+
+static void gdc_cmd_reset(GDCState *s)
+{
+    /*
+     * The uPD7220 RESET command clears the command/FIFO machinery, not the
+     * programmed display parameters.  PC-98 Windows VDDs deliberately set
+     * CSRFORM before issuing RESET and rely on the cursor form surviving it.
+     * A full device reset is handled separately by gdc_reset().
+     */
+    s->params_count = 0;
+    s->data_count = s->data_read = s->data_write = 0;
+    s->statreg = 0;
+    s->cmdreg = -1;
 }
 
 static void gdc_cmd_sync(GDCState *s)
@@ -747,21 +765,23 @@ static void gdc_cmd_slave(GDCState *s)
     s->cmdreg = -1;
 }
 
-static void gdc_cmd_start(GDCState *s)
+static void gdc_set_start(GDCState *s, bool start)
 {
-    if (!s->start) {
-        s->start = 1;
+    if (s->start != start) {
+        s->start = start;
         s->dirty |= GDC_DIRTY_START;
     }
+}
+
+static void gdc_cmd_start(GDCState *s)
+{
+    gdc_set_start(s, true);
     s->cmdreg = -1;
 }
 
 static void gdc_cmd_stop(GDCState *s)
 {
-    if (s->start) {
-        s->start = 0;
-        s->dirty |= GDC_DIRTY_START;
-    }
+    gdc_set_start(s, false);
     s->cmdreg = -1;
 }
 
@@ -1040,6 +1060,11 @@ static void gdc_check_cmd(GDCState *s)
         break;
     case GDC_CMD_SYNC + 0:
     case GDC_CMD_SYNC + 1:
+        /*
+         * SYNC OFF/ON also controls the display.  This takes effect when
+         * the command byte is received, before the eight timing parameters.
+         */
+        gdc_set_start(s, s->cmdreg & 1);
         if (s->params_count > 7) {
             gdc_cmd_sync(s);
         }
@@ -1053,6 +1078,7 @@ static void gdc_check_cmd(GDCState *s)
     case GDC_CMD_START:
         gdc_cmd_start(s);
         break;
+    case GDC_CMD_STOP:
     case GDC_CMD_BCTRL + 0:
         gdc_cmd_stop(s);
         break;
@@ -1334,11 +1360,6 @@ static void gdc_get_cursor_address(GDCState *s, uint32_t mask,
 }
 
 /* interface */
-
-static void gdc_reset(GDCState *s)
-{
-    gdc_cmd_reset(s);
-}
 
 static void gdc_init(GDCState *s, void *vga,
                      VGAReadFunc *vram_read, VGAWriteFunc *vram_write)
@@ -4313,7 +4334,7 @@ static void render_chr_screen(VGAState *s)
                     if ((attr & ATTR_VL)  && !s->mode1[MODE1_ATRSEL]) {
                         pattern |= 0x08;
                     }
-                    if (cursor && l >= cursor_top && l < cursor_bottom) {
+                    if (cursor && l >= cursor_top && l <= cursor_bottom) {
                         pattern = ~pattern;
                     }
                     if (s->mode1[MODE1_COLUMN]) {
@@ -4633,16 +4654,22 @@ QemuConsole *pc98_vga_get_console(Pc98VgaState *opaque)
     return s->con;
 }
 
-void pc98_vga_select_console(Pc98VgaState *opaque)
+bool pc98_vga_update_console(Pc98VgaState *opaque)
+{
+    return update_display(opaque);
+}
+
+void pc98_vga_invalidate_console(Pc98VgaState *opaque)
+{
+    invalidate_display(opaque);
+}
+
+bool pc98_vga_display_enabled(Pc98VgaState *opaque)
 {
     VGAState *s = opaque;
 
-    qemu_graphic_console_set_hwops(s->con, &pc98_vga_gfx_ops, s);
-    qemu_console_hw_invalidate(s->con);
-    /*
-     * The next UI refresh performs the update.  Calling it here can resize
-     * an SDL window from a vCPU I/O callback, which deadlocks on Windows.
-     */
+    return s->mode1[MODE1_DISP] &&
+           (s->gdc_chr.start || s->gdc_gfx.start);
 }
 
 /* font (based on Neko Project 2) */
@@ -4804,6 +4831,186 @@ static void pc98_vga_reset(void *opaque)
     s->width = 640;
     s->height = 400;
 }
+
+static const VMStateDescription vmstate_pc98_gdc = {
+    .name = "pc98-vga/gdc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT32(cmdreg, GDCState),
+        VMSTATE_UINT8(statreg, GDCState),
+        VMSTATE_UINT8_ARRAY(sync, GDCState, 16),
+        VMSTATE_UINT8(zoom, GDCState),
+        VMSTATE_UINT8(zr, GDCState),
+        VMSTATE_UINT8(zw, GDCState),
+        VMSTATE_UINT8_ARRAY(ra, GDCState, 16),
+        VMSTATE_UINT8_ARRAY(cs, GDCState, 3),
+        VMSTATE_UINT8(pitch, GDCState),
+        VMSTATE_UINT32(lad, GDCState),
+        VMSTATE_UINT8_ARRAY(vect, GDCState, 11),
+        VMSTATE_UINT32(ead, GDCState),
+        VMSTATE_UINT32(dad, GDCState),
+        VMSTATE_UINT8(maskl, GDCState),
+        VMSTATE_UINT8(maskh, GDCState),
+        VMSTATE_UINT8(mod, GDCState),
+        VMSTATE_UINT8(start, GDCState),
+        VMSTATE_UINT8(dirty, GDCState),
+        VMSTATE_UINT8_ARRAY(params, GDCState, 16),
+        VMSTATE_INT32(params_count, GDCState),
+        VMSTATE_UINT8_ARRAY(data, GDCState, GDC_BUFFERS),
+        VMSTATE_INT32(data_count, GDCState),
+        VMSTATE_INT32(data_read, GDCState),
+        VMSTATE_INT32(data_write, GDCState),
+        VMSTATE_INT32(dx, GDCState),
+        VMSTATE_INT32(dy, GDCState),
+        VMSTATE_INT32(dir, GDCState),
+        VMSTATE_INT32(diff, GDCState),
+        VMSTATE_INT32(sl, GDCState),
+        VMSTATE_INT32(dc, GDCState),
+        VMSTATE_INT32(d, GDCState),
+        VMSTATE_INT32(d2, GDCState),
+        VMSTATE_INT32(d1, GDCState),
+        VMSTATE_INT32(dm, GDCState),
+        VMSTATE_UINT16(pattern, GDCState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_pc98_egc = {
+    .name = "pc98-vga/egc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT16(access, EGCState),
+        VMSTATE_UINT16(fgbg, EGCState),
+        VMSTATE_UINT16(ope, EGCState),
+        VMSTATE_UINT16(fg, EGCState),
+        VMSTATE_UINT16(mask.w, EGCState),
+        VMSTATE_UINT16(bg, EGCState),
+        VMSTATE_UINT16(sft, EGCState),
+        VMSTATE_UINT16(leng, EGCState),
+        VMSTATE_UINT64(lastvram.q, EGCState),
+        VMSTATE_UINT64(patreg.q, EGCState),
+        VMSTATE_UINT64(fgc.q, EGCState),
+        VMSTATE_UINT64(bgc.q, EGCState),
+        VMSTATE_INT32(func, EGCState),
+        VMSTATE_UINT32(remain, EGCState),
+        VMSTATE_UINT32(stack, EGCState),
+        VMSTATE_UINT16(mask2.w, EGCState),
+        VMSTATE_UINT16(srcmask.w, EGCState),
+        VMSTATE_UINT8(srcbit, EGCState),
+        VMSTATE_UINT8(dstbit, EGCState),
+        VMSTATE_UINT8(sft8bitl, EGCState),
+        VMSTATE_UINT8(sft8bitr, EGCState),
+        VMSTATE_UINT8_ARRAY(buf, EGCState, 528),
+        VMSTATE_UINT64(vram_src.q, EGCState),
+        VMSTATE_UINT64(vram_data.q, EGCState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static int pc98_vga_pre_save(void *opaque)
+{
+    VGAState *s = opaque;
+
+    if (s->egc.inptr < s->egc.buf ||
+        s->egc.inptr > s->egc.buf + sizeof(s->egc.buf) ||
+        s->egc.outptr < s->egc.buf ||
+        s->egc.outptr > s->egc.buf + sizeof(s->egc.buf)) {
+        return -EINVAL;
+    }
+    s->egc_in_offset = s->egc.inptr - s->egc.buf;
+    s->egc_out_offset = s->egc.outptr - s->egc.buf;
+    return 0;
+}
+
+static int pc98_vga_post_load(void *opaque, int version_id)
+{
+    VGAState *s = opaque;
+    uint8_t saved_disp;
+
+    if (s->gdc_chr.params_count < 0 || s->gdc_chr.params_count > 16 ||
+        s->gdc_gfx.params_count < 0 || s->gdc_gfx.params_count > 16 ||
+        s->gdc_chr.data_count < 0 || s->gdc_chr.data_count > GDC_BUFFERS ||
+        s->gdc_gfx.data_count < 0 || s->gdc_gfx.data_count > GDC_BUFFERS ||
+        s->egc_in_offset > sizeof(s->egc.buf) ||
+        s->egc_out_offset > sizeof(s->egc.buf)) {
+        return -EINVAL;
+    }
+
+    s->egc.inptr = s->egc.buf + s->egc_in_offset;
+    s->egc.outptr = s->egc.buf + s->egc_out_offset;
+
+    saved_disp = s->bank_disp;
+    s->bank_disp = 0xff;
+    vram_disp_write(s, 0, saved_disp == DIRTY_VRAM1);
+    vram_draw_write(s, 0, s->bank_draw == DIRTY_VRAM1);
+    s->vram256_draw_0 = s->vram256 +
+                        (s->vram256_bank_0 & 0x0f) * 0x8000;
+    s->vram256_draw_1 = s->vram256 +
+                        (s->vram256_bank_1 & 0x0f) * 0x8000;
+    s->bank256_draw_0 = (s->vram256_bank_0 & 0x08) ?
+                        DIRTY_VRAM1 : DIRTY_VRAM0;
+    s->bank256_draw_1 = (s->vram256_bank_1 & 0x08) ?
+                        DIRTY_VRAM1 : DIRTY_VRAM0;
+    egc_set_vram(&s->egc, s->vram16_draw_b);
+    cgwindow_set_addr(s);
+    update_palette(s);
+    s->gdc_chr.dirty |= GDC_DIRTY_SCROLL;
+    s->gdc_gfx.dirty |= GDC_DIRTY_SCROLL;
+    s->dirty = 0xff;
+    qemu_set_irq(s->irq, 0);
+    return 0;
+}
+
+static const VMStateDescription vmstate_pc98_vga = {
+    .name = "pc98-vga",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = pc98_vga_pre_save,
+    .post_load = pc98_vga_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(font, VGAState, 0x84000),
+        VMSTATE_UINT8_ARRAY(tvram, VGAState, TVRAM_SIZE),
+        VMSTATE_UINT8_ARRAY(vram16, VGAState, VRAM16_SIZE),
+        VMSTATE_UINT8_ARRAY(vram256, VGAState, VRAM256_SIZE),
+        VMSTATE_STRUCT(gdc_chr, VGAState, 0, vmstate_pc98_gdc, GDCState),
+        VMSTATE_STRUCT(gdc_gfx, VGAState, 0, vmstate_pc98_gdc, GDCState),
+        VMSTATE_STRUCT(egc, VGAState, 0, vmstate_pc98_egc, EGCState),
+        VMSTATE_UINT16(egc_in_offset, VGAState),
+        VMSTATE_UINT16(egc_out_offset, VGAState),
+        VMSTATE_UINT8(grcg_mode, VGAState),
+        VMSTATE_UINT8(grcg_tile_cnt, VGAState),
+        VMSTATE_UINT8_ARRAY(grcg_tile_b, VGAState, 4),
+        VMSTATE_UINT16_ARRAY(grcg_tile_w, VGAState, 4),
+        VMSTATE_UINT8(crtv, VGAState),
+        VMSTATE_UINT8(pl, VGAState),
+        VMSTATE_UINT8(bl, VGAState),
+        VMSTATE_UINT8(cl, VGAState),
+        VMSTATE_UINT8(ssl, VGAState),
+        VMSTATE_UINT8(sur, VGAState),
+        VMSTATE_UINT8(sdr, VGAState),
+        VMSTATE_UINT8_ARRAY(mode1, VGAState, 8),
+        VMSTATE_UINT8_ARRAY(mode2, VGAState, 128),
+        VMSTATE_UINT8_ARRAY(mode3, VGAState, 128),
+        VMSTATE_UINT8(mode_select, VGAState),
+        VMSTATE_UINT8_ARRAY(digipal, VGAState, 4),
+        VMSTATE_UINT8_2DARRAY(anapal, VGAState, 3, 256),
+        VMSTATE_UINT8(anapal_select, VGAState),
+        VMSTATE_UINT8(bank_draw, VGAState),
+        VMSTATE_UINT8(bank_disp, VGAState),
+        VMSTATE_UINT8(bank256_draw_0, VGAState),
+        VMSTATE_UINT8(bank256_draw_1, VGAState),
+        VMSTATE_UINT16(vram256_bank_0, VGAState),
+        VMSTATE_UINT16(vram256_bank_1, VGAState),
+        VMSTATE_UINT16(font_code, VGAState),
+        VMSTATE_UINT8(font_line, VGAState),
+        VMSTATE_UINT8(blink, VGAState),
+        VMSTATE_TIMER_PTR(vsync_timer, VGAState),
+        VMSTATE_INT64(vsync_clock, VGAState),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 
 /* portio wrappers: portio lists share one opaque, dispatch to sub-states */
@@ -5007,6 +5214,7 @@ Pc98VgaState *pc98_vga_init(MemoryRegion *system_io, qemu_irq irq,
 
     pc98_vga_reset(s);
     qemu_register_reset(pc98_vga_reset, s);
+    vmstate_register(NULL, 0, &vmstate_pc98_vga, s);
 
     s->con = qemu_graphic_console_create(NULL, 0, &pc98_vga_gfx_ops, s);
 

@@ -49,6 +49,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/log.h"
 #include "qom/object.h"
+#include "migration/vmstate.h"
 
 #define ADDR 0
 #define COUNT 1
@@ -524,6 +525,50 @@ static void pc98_dma_reset(DeviceState *dev)
     d->access_reg = 0;
 }
 
+static const VMStateDescription vmstate_pc98_dma_regs = {
+    .name = "pc98-dma/regs",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT32_ARRAY(now, Pc98DmaRegs, 2),
+        VMSTATE_UINT16_ARRAY(base, Pc98DmaRegs, 2),
+        VMSTATE_UINT8(mode, Pc98DmaRegs),
+        VMSTATE_UINT8(page, Pc98DmaRegs),
+        VMSTATE_UINT8(pageh, Pc98DmaRegs),
+        VMSTATE_UINT8(dack, Pc98DmaRegs),
+        VMSTATE_UINT8(eop, Pc98DmaRegs),
+        VMSTATE_UINT8(bank_wrap, Pc98DmaRegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static int pc98_dma_post_load(void *opaque, int version_id)
+{
+    Pc98DmaState *d = opaque;
+
+    d->running = 0;
+    d->dma_bh_scheduled = false;
+    pc98_dma_run(d);
+    return 0;
+}
+
+static const VMStateDescription vmstate_pc98_dma = {
+    .name = "pc98-dma",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = pc98_dma_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(status, Pc98DmaState),
+        VMSTATE_UINT8(command, Pc98DmaState),
+        VMSTATE_UINT8(mask, Pc98DmaState),
+        VMSTATE_UINT8(flip_flop, Pc98DmaState),
+        VMSTATE_UINT8(access_reg, Pc98DmaState),
+        VMSTATE_STRUCT_ARRAY(regs, Pc98DmaState, 4, 1,
+                             vmstate_pc98_dma_regs, Pc98DmaRegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static int pc98_dma_phony_handler(void *opaque, int nchan, int dma_pos,
                                   int dma_len)
 {
@@ -554,6 +599,7 @@ static void pc98_dma_class_init(ObjectClass *klass, const void *data)
     IsaDmaClass *idc = ISADMA_CLASS(klass);
 
     dc->realize = pc98_dma_realize;
+    dc->vmsd = &vmstate_pc98_dma;
     device_class_set_legacy_reset(dc, pc98_dma_reset);
 
     idc->has_autoinitialization = pc98_dma_has_autoinitialization;
@@ -565,7 +611,6 @@ static void pc98_dma_class_init(ObjectClass *klass, const void *data)
     idc->register_channel = pc98_dma_register_channel;
     /* Reason: needs to be wired up by isa_bus_dma() to work */
     dc->user_creatable = false;
-    /* TODO: migration support (vmstate) */
 }
 
 static const TypeInfo pc98_dma_info = {

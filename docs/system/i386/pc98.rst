@@ -1,9 +1,9 @@
-NEC PC-9821 machine (``pc98``)
-==============================
+NEC PC-9801 and PC-9821 machines
+================================
 
-The ``pc98`` machine models a NEC PC-9821, the 32-bit member of the PC-98
-family of Japanese personal computers.  It boots the machine's own ROM BIOS
-(ITF + BIOS) and runs PC-98 MS-DOS and PC-98 applications.
+The ``pc9801`` and ``pc9821`` machines model members of NEC's PC-98 family of
+Japanese personal computers.  They boot the machine's own ROM BIOS
+(ITF + BIOS) and run PC-98 operating systems and applications.
 
 The PC-98 is x86-based but is **not** a PC/AT compatible: the interrupt
 controller cascade, the timer clock, the I/O port map, the A20 behaviour, the
@@ -11,9 +11,27 @@ disk BIOS geometry and the text/graphics hardware all differ from the AT.  The
 machine therefore derives from ``TYPE_X86_MACHINE`` directly rather than from
 the PC/AT board code, and its devices live in their own files.
 
-## Firmware
+Machine variants
+----------------
 
-The machine needs the target ROM images, which are not shipped with QEMU.
+``pc9801``
+  Models the pre-PCI PC-9801 configuration.  It has the GDC, GRCG and EGC
+  display path, but does not instantiate a PCI host bridge or the PC-9821
+  Core-Graph device.  PCI devices cannot be attached to this machine.
+
+``pc9821``
+  Models a PCI-equipped PC-9821.  It instantiates the PC-98 PCI host bridge
+  and the on-board Core-Graph bridge.  The Cirrus graphics function below
+  Core-Graph is not exposed as a separate PCI function.
+
+This distinction is a machine contract: selecting ``pc9801`` must never
+silently add PCI or Core-Graph.  Both variants can use the same free
+compatibility BIOS, which probes for the PCI host before using PCI services.
+
+Firmware
+--------
+
+The machine needs the target ROM images, and QEMU has a compatible ones.
 Point ``-L`` at a directory containing them.  Either layout is accepted:
 
 * one file per 32 KiB ROM bank: ``pc98bank0.bin`` .. ``pc98bank7.bin``; or
@@ -23,32 +41,22 @@ The ITF and the three main BIOS banks are mandatory; ``pc98pci.bin`` and
 ``pc98ide.bin`` are optional.  The text font ``pc98font.bin`` is required for
 display output.
 
-Note
-----
-
-The high-resolution timer that later PC-9821 models expose (a free-running
-1/32-second counter kept in the BIOS work area) is **not implemented yet**.  A
-**PC-9801 BIOS** image should therefore be used; a PC-9821 BIOS that depends
-on this timer may not run correctly for now.
-
 Running
 -------
 
-With the firmware in ``<romdir>`` and a bootable floppy image::
+With the firmware in ``<romdir>`` and a bootable floppy image:
 
-```
-qemu-system-i386 -M pc98 -L <romdir> -drive if=floppy,format=raw,file=dos.img
-```
+.. code-block:: console
 
-```
-ls roms
-pc98bios.bin  pc98font.bin  pc98ide.bin  pc98itf.bin
-```
+   qemu-system-i386 -M pc9801 -L <romdir> \
+       -drive if=floppy,format=raw,file=dos.img
+
+Use ``-M pc9821`` instead when the PCI/Core-Graph machine is required.
 
 Supported devices
 -----------------
 
-* One 486-class CPU (uniprocessor).
+* One Pentium-class CPU (uniprocessor).
 * Interrupt controllers: a master/slave 8259A pair with the cascade on IRQ 7
   (the PC/AT uses IRQ 2), reachable at the stride-2 PC-98 ports.
 * Interval timer: 8253/8254 clocked at 2.4576 MHz.
@@ -67,41 +75,100 @@ Supported devices
 Disks
 -----
 
-Floppies use the usual ``if=floppy`` interface::
+Floppies use the usual ``if=floppy`` interface:
 
-```
-qemu-system-i386 -M pc98 -L <romdir> -drive if=floppy,format=raw,file=dos.img
-```
+.. code-block:: console
 
-Hard disks use the PC-98-specific ``if=ide98`` interface.  This keeps the
-PC-98 IDE out of QEMU's generic geometry auto-detection: the PC-98 IDE BIOS
-always addresses a disk as 8 heads / 17 sectors per track, so images must be
-partitioned for that geometry::
+   qemu-system-i386 -M pc9801 -L <romdir> \
+       -drive if=floppy,format=raw,file=dos.img
 
-```
-qemu-system-i386 -M pc98 -L <romdir> -drive if=ide98,format=raw,file=hdd.raw
-```
+Hard disks use QEMU's standard ``if=ide`` interface.  On a ``pc9801`` or
+``pc9821`` machine it attaches to the PC-98 IDE controller, which applies the
+fixed 8-head / 17-sector PC-98 BIOS geometry.  Images must be partitioned for
+that geometry:
+
+.. code-block:: console
+
+   qemu-system-i386 -M pc9821 -L <romdir> \
+       -drive if=ide,format=raw,file=hdd.raw
 
 A host directory can be exposed as a PC-98-formatted read/write FAT disk with
-the ``fat98`` block driver (a PC-98 variant of ``fat:``)::
+the ``fat98`` block driver (a PC-98 variant of ``fat:``):
 
-```
-qemu-system-i386 -M pc98 -L <romdir> -drive if=ide98,unit=1,format=raw,file=fat98:rw:/path/to/dir
-```
+.. code-block:: console
 
-An ATAPI CD-ROM is attached to the same ``if=ide98`` interface with
+   qemu-system-i386 -M pc9821 -L <romdir> \
+       -drive if=ide,bus=1,unit=1,format=raw,file=fat98:rw:/path/to/dir
+
+Directory-backed DOS boot
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``fat98:`` generates a free PC-98 IPL, a PC-98 partition table, and a FAT16
+partition boot record.  If the mapped directory contains suitable PC-98
+MS-DOS system files, the generated disk is directly bootable.  For MS-DOS
+6.20, place ``IO.SYS``, ``MSDOS.SYS``, and ``COMMAND.COM`` in the directory.
+The loader reads the first 64 KiB of ``IO.SYS`` and arranges ``IO.SYS`` and
+``MSDOS.SYS`` first in the FAT allocation order, independently of host
+directory iteration order.
+
+The on-disk BPB uses the PC-98 fixed-disk convention of 1024-byte DOS logical
+sectors while the IDE device and QEMU block layer retain 512-byte physical
+sectors.  The generated PBR also supplies the PC-98-specific BPB extension
+consumed by NEC DOS.
+
+The explicit block/device form is:
+
+.. code-block:: console
+
+   qemu-system-i386 -M pc9821 -L <romdir> \
+       -drive file=fat98:rw:/path/to/dosdir,format=raw,if=none,id=dosdir \
+       -device ide-hd,drive=dosdir,bus=ide.0,unit=0 -boot c
+
+Use a disposable copy of the directory when testing: ``fat98:rw:`` propagates
+guest filesystem writes back to host files.  A directory without ``IO.SYS``
+remains usable as an ordinary data disk; it simply cannot complete the DOS
+boot path.
+
+An ATAPI CD-ROM is attached to the same ``if=ide`` interface with
 ``media=cdrom``.  The interface has two channels of two units each; placing
 the CD-ROM on the second channel (``bus=1``) leaves the first channel for the
-boot hard disk::
+boot hard disk:
 
-```
-qemu-system-i386 -M pc98 -L <romdir> \
-    -drive if=ide98,bus=0,unit=0,format=raw,file=hdd.raw \
-    -drive if=ide98,bus=1,unit=0,media=cdrom,file=disc.iso
-```
+.. code-block:: console
+
+   qemu-system-i386 -M pc9821 -L <romdir> \
+       -drive if=ide,bus=0,unit=0,format=raw,file=hdd.raw \
+       -drive if=ide,bus=1,unit=0,media=cdrom,readonly=on,file=disc.iso
 
 This is enough to install, for example, FreeBSD 8.4/pc98 from its release
 CD-ROM: the ATAPI drive appears to the guest as ``acd0``.
+
+The optional PC-9801-92 SCSI board uses the standard ``if=scsi`` spelling and
+is created only when such a drive is present.  QEMU-standard disk and CD-ROM
+media are accepted; the earlier project-local ``if=scsi98`` spelling and
+``media=mo``/``media=zip`` experiments are obsolete:
+
+.. code-block:: console
+
+   qemu-system-i386 -M pc9821 -L <romdir> \
+       -drive if=scsi,format=raw,file=scsidisk.raw
+
+The controller device's internal QOM name is ``pc98-scsi``.  Its functional
+completion and SCSI BIOS work are deferred, so this interface is currently
+intended for development and smoke testing.
+
+Serial and network
+------------------
+
+The built-in RS-232C port is created through QEMU's standard ``-serial``
+option.  For example, ``-serial /dev/ttyUSB0`` uses a host serial device on
+POSIX, while ``-serial COM3`` selects a Windows COM port.  The internal QOM
+device is ``pc98-serial``; the former ``-device serial98`` spelling is
+obsolete.
+
+LGY-98 networking is optional and uses the internal device name
+``pc98-lgy98`` with a normal QEMU network backend, for example
+``-nic user,model=pc98-lgy98``.
 
 Sound
 -----
@@ -130,16 +197,9 @@ Both are optional and are created with ``-device pc98-opna`` and
 Limitations
 -----------
 
-Not yet implemented:
+Not implemented:
 
-- bus mouse
-- serial ports
-- networking
 - EMS
-- high-resolution timer (see the firmware note above)
-- migration/savevm
 - SMP
-- WAB linear-framebuffer
-
-The Window Accelerator Board (WAB) linear-framebuffer device is planned for
-later.
+- complete compatibility-BIOS services
+- complete PC-9801-92 SCSI and SCSI BIOS behavior

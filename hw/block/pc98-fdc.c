@@ -1968,20 +1968,28 @@ static uint32_t fdctrl_read_data(FDCtrl *fdctrl)
     return retval;
 }
 
-static void fdctrl_format_sector(FDCtrl *fdctrl)
+static bool fdctrl_format_sector(FDCtrl *fdctrl)
 {
     FDrive *cur_drv;
-    uint8_t kh, kt, ks;
+    uint8_t kh, kt, ks, kn;
+    uint32_t id_pos;
+    g_autofree uint8_t *sector = NULL;
 
     SET_CUR_DRV(fdctrl, fdctrl->fifo[1] & FD_DOR_SELMASK);
     cur_drv = get_cur_drv(fdctrl);
-    kt = fdctrl->fifo[6];
-    kh = fdctrl->fifo[7];
-    ks = fdctrl->fifo[8];
+    id_pos = fdctrl->data_pos - 4;
+    kt = fdctrl->fifo[id_pos + 0];
+    kh = fdctrl->fifo[id_pos + 1];
+    ks = fdctrl->fifo[id_pos + 2];
+    kn = fdctrl->fifo[id_pos + 3];
     FLOPPY_DPRINTF("format sector at %d %d %02x %02x (%d)\n",
                    GET_CUR_DRV(fdctrl), kh, kt, ks,
                    fd_sector_calc(kh, kt, ks, cur_drv->last_sect,
                                   NUM_SIDES(cur_drv)));
+    if (kn > 3 || (128U << kn) != cur_drv->bps) {
+        fdctrl_stop_transfer(fdctrl, FD_SR0_ABNTERM, FD_SR1_MA, 0x00);
+        return false;
+    }
     switch (fd_seek(cur_drv, kh, kt, ks, fdctrl->config & FD_CONFIG_EIS)) {
     case 2:
         /* sect too big */
@@ -1989,44 +1997,37 @@ static void fdctrl_format_sector(FDCtrl *fdctrl)
         fdctrl->fifo[3] = kt;
         fdctrl->fifo[4] = kh;
         fdctrl->fifo[5] = ks;
-        return;
+        return false;
     case 3:
         /* track too big */
         fdctrl_stop_transfer(fdctrl, FD_SR0_ABNTERM, FD_SR1_EC, 0x00);
         fdctrl->fifo[3] = kt;
         fdctrl->fifo[4] = kh;
         fdctrl->fifo[5] = ks;
-        return;
+        return false;
     case 4:
         /* No seek enabled */
         fdctrl_stop_transfer(fdctrl, FD_SR0_ABNTERM, 0x00, 0x00);
         fdctrl->fifo[3] = kt;
         fdctrl->fifo[4] = kh;
         fdctrl->fifo[5] = ks;
-        return;
+        return false;
     case 1:
         fdctrl->status0 |= FD_SR0_SEEK;
         break;
     default:
         break;
     }
-    memset(fdctrl->fifo, 0, PC98_FDC_FIFO_LEN);
+    sector = g_malloc(cur_drv->bps);
+    memset(sector, fdctrl->fifo[5], cur_drv->bps);
     if (cur_drv->blk == NULL ||
         blk_pwrite(cur_drv->blk, fd_offset(cur_drv), fd_bps(cur_drv),
-                   fdctrl->fifo, 0) < 0) {
+                   sector, 0) < 0) {
         FLOPPY_DPRINTF("error formatting sector %d\n", fd_sector(cur_drv));
         fdctrl_stop_transfer(fdctrl, FD_SR0_ABNTERM | FD_SR0_SEEK, 0x00, 0x00);
-    } else {
-        if (cur_drv->sect == cur_drv->last_sect) {
-            fdctrl->data_state &= ~FD_STATE_FORMAT;
-            /* Last sector done */
-            fdctrl_stop_transfer(fdctrl, 0x00, 0x00, 0x00);
-        } else {
-            /* More to do */
-            fdctrl->data_pos = 0;
-            fdctrl->data_len = 4;
-        }
+        return false;
     }
+    return true;
 }
 
 static void fdctrl_handle_lock(FDCtrl *fdctrl, int direction)
@@ -2158,12 +2159,15 @@ static void fdctrl_handle_format_track(FDCtrl *fdctrl, int direction)
 #else
     cur_drv->last_sect = fdctrl->fifo[3];
 #endif
-    /* TODO: implement format using DMA expected by the Bochs BIOS
-     * and Linux fdformat (read 3 bytes per sector via DMA and fill
-     * the sector with the specified fill byte
+    /*
+     * The six command bytes remain at fifo[0..5].  In non-DMA mode the
+     * guest now supplies SC four-byte C/H/R/N descriptors.  Starting at
+     * fifo[6] preserves the command's fill byte at fifo[5].
      */
-    fdctrl->data_state &= ~FD_STATE_FORMAT;
-    fdctrl_stop_transfer(fdctrl, 0x00, 0x00, 0x00);
+    fdctrl->data_pos = 6;
+    fdctrl->data_len = 6 + fdctrl->fifo[3] * 4;
+    fdctrl->msr |= FD_MSR_RQM | FD_MSR_NONDMA;
+    fdctrl->msr &= ~FD_MSR_DIO;
 }
 
 static void fdctrl_handle_specify(FDCtrl *fdctrl, int direction)
@@ -2526,6 +2530,20 @@ static void fdctrl_write_data(FDCtrl *fdctrl, uint32_t value)
          * we would have errored out above. */
         assert(fdctrl->msr & FD_MSR_NONDMA);
 
+        if (fdctrl->data_state & FD_STATE_FORMAT) {
+            if ((fdctrl->data_pos - 6) % 4 == 0 &&
+                !fdctrl_format_sector(fdctrl)) {
+                break;
+            }
+            if (fdctrl->data_pos == fdctrl->data_len) {
+                fdctrl->data_state &= ~FD_STATE_FORMAT;
+                fdctrl_stop_transfer(fdctrl, 0x00, 0x00, 0x00);
+            } else {
+                fdctrl->msr |= FD_MSR_RQM;
+            }
+            break;
+        }
+
         /* FIFO data write */
         if (pos == fd_bps(get_cur_drv(fdctrl)) - 1 ||
             fdctrl->data_pos == fdctrl->data_len) {
@@ -2534,6 +2552,17 @@ static void fdctrl_write_data(FDCtrl *fdctrl, uint32_t value)
                            fdctrl->fifo, 0) < 0) {
                 FLOPPY_DPRINTF("error writing sector %d\n",
                                fd_sector(cur_drv));
+                break;
+            }
+            /*
+             * A non-DMA command may end exactly at this sector.  Complete
+             * the transfer before advancing CHS: fdctrl_seek_to_next_sect()
+             * legitimately fails when EOT equals the current sector, and
+             * leaving the controller in execution phase then makes the BIOS
+             * wait forever despite the sector having been written.
+             */
+            if (fdctrl->data_pos == fdctrl->data_len) {
+                fdctrl_stop_transfer(fdctrl, 0x00, 0x00, 0x00);
                 break;
             }
             if (!fdctrl_seek_to_next_sect(fdctrl, cur_drv)) {
