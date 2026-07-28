@@ -109,7 +109,7 @@ struct Pc98MachineClass {
 
     bool has_pci;   /* instantiate the PCI host bridge */
     bool has_wab;   /* instantiate the legacy NEC-LSI/Cirrus WAB */
-    bool has_pegc;  /* expose the built-in PEGC 256-colour mode */
+    bool has_pegc;  /* expose the built-in PEGC 256-colour mode (unused) */
     bool has_coregraph; /* PCI Core-Graph with a non-PnP Cirrus child */
 };
 
@@ -548,7 +548,7 @@ static void pc98_class_init(ObjectClass *oc, const void *data)
 
     pmc->has_pci = false;
     pmc->has_wab = true;
-    pmc->has_pegc = true;
+    pmc->has_pegc = false;
     pmc->has_coregraph = false;
 
 }
@@ -585,7 +585,12 @@ static void pc9821_class_init(ObjectClass *oc, const void *data)
     mc->desc = "NEC PC-9821";
     pmc->has_pci = true;
     pmc->has_wab = false;
-    pmc->has_pegc = true;
+    /*
+     * Core-Graph is the supported PC-9821 graphics path.  Do not expose
+     * PEGC, whose linear aperture requires reserving the 15-16 MiB system
+     * space and costs the guest one MiB of usable RAM.
+     */
+    pmc->has_pegc = false;
     pmc->has_coregraph = true;
 
     compat_props_add(mc->compat_props, pc98_compat_props,

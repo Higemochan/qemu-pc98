@@ -213,9 +213,9 @@ cold_start:
 	movb	$0x00, 0x0456
 	/*
 	 * Preserve the free ITF's memory-size and CPU-capability results at
-	 * 0401h/0481h.  In particular, 0401h=70h describes the usable memory
-	 * below the PC-9821 16-MiB system window.  Advertising 78h makes
-	 * Windows allocate one extra MiB across that reserved window.
+	 * 0401h/0481h.  The free ITF disables the unused PC-9821 16-MiB
+	 * system window, so 0401h=78h describes all 15 MiB of extended RAM
+	 * below 16 MiB.  Keep the port-43Bh state and this report in agreement.
 	 */
 	movw	$0x0480, 0x0486
 	/*

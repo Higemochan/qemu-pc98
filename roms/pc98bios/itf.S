@@ -40,6 +40,10 @@
 	/* A20 mask control: write 0x02 to release the line, 0x03 to mask it. */
 	.equ	A20_CMD,	0xf6
 
+	/* 15-16 MiB system-space control: bit 2 set exposes ordinary RAM. */
+	.equ	SYS16M_CTRL,	0x43b
+	.equ	SYS16M_DISABLE,	0x04
+
 	/*
 	 * Memory probe: an arbitrary signature, and a ceiling of 496 MiB above
 	 * the 16 MiB line -- 512 MiB total, more than any PC-98 shipped with.
@@ -193,6 +197,16 @@ cold_start:
 	movw	$POST_STACK, %sp
 
 	call	pic_init
+
+	/*
+	 * PEGC is not exposed by the supported machine configuration, so the
+	 * 15-16 MiB system-space mirror serves no device.  Disable the hole
+	 * before sizing memory and keep this hardware state in lockstep with
+	 * the BIOS work-area value written by workarea_init.
+	 */
+	movb	$SYS16M_DISABLE, %al
+	movw	$SYS16M_CTRL, %dx
+	outb	%al, %dx
 	call	workarea_init
 
 	/* Source of the table and the copy below is this ROM. */
@@ -315,11 +329,10 @@ cold_start:
  */
 workarea_init:
 	/*
-	 * PC-9821 reserves the 15-16 MiB system window.  Advertising 0x78
-	 * instead of 0x70 makes Windows allocate one MiB too high across that
-	 * hole and eventually fail in IOS while entering protected mode.
+	 * Port 43Bh has disabled the unused 15-16 MiB system window, making
+	 * the full 15 MiB between 1 MiB and 16 MiB available as RAM.
 	 */
-	movb	$0x70, WA_MEMSIZE
+	movb	$0x78, WA_MEMSIZE
 	/* system clock, 5 MHz series */
 	movb	$0x24, WA_CLOCK
 	/* the emulated keyboard speaks the PC-9801-119 extended command set */
