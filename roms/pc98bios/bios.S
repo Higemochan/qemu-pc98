@@ -60,6 +60,11 @@
 	.equ	DMA_ACCESS,	0x0439
 	.equ	DMA_PAGEH_0,	0x0e05
 	.equ	BIOS_SHUTDOWN_PORT, 0x8900
+	.equ	ROM_BANK_PORT,	0x043f
+	.equ	ROM_BANKFLIP_PORT, 0x043d
+	.equ	BASIC_BANK_SELECT, 0xe4
+	.equ	BASIC_THUNK,	0x0800
+	.equ	SCSI_ROM_SEG,	0xd200
 
 	.equ	KB_BUF,		0x0502
 	.equ	KB_BUF_END,	0x0522
@@ -271,6 +276,7 @@ cold_start:
 	 * those work-area cells when classifying the fixed-disk BIOS.
 	 */
 	call	select_ide_rom
+	call	scsi_rom_init
 	movw	$0x04d8, %bx
 	lcall	$0xd800, $0x000c
 	lcall	$0xd800, $0x000f
@@ -327,12 +333,65 @@ boot_retry:
 	/* The IDE ROM reads two IPL sectors and far-calls 1FC0:0000. */
 1:
 	lcall	$0xd800, $0x0015
+	cmpb	$0, POST_BOOT_POLICY
+	jne	boot_failed
+	call	scsi_rom_present
+	jnc	boot_failed
+	movb	$0x0c, %al		/* recognised SCSI fixed-disk class */
+	lcall	$SCSI_ROM_SEG, $0x0015
 
 boot_failed:
+	jmp	basic_boot
+
+basic_missing:
 	call	post_boot_error
 	movb	$0x00, %ah
 	int	$0x18
 	jmp	boot_retry
+
+/*
+ * Enter the optional free ROM BASIC compatibility stub in bank 2.
+ *
+ * Switching the F8000h window while executing the main BIOS from that same
+ * window would replace the instruction stream immediately.  Copy a short
+ * bank-switching thunk to ordinary RAM, execute the switch there, verify the
+ * pc98basic.bin signature and only then enter F800:0000.  An unrelated
+ * pc98bank2.bin is left untouched and falls back to the existing retry UI.
+ */
+basic_boot:
+	cli
+	cld
+	pushw	%cs
+	popw	%ds
+	xorw	%ax, %ax
+	movw	%ax, %es
+	movw	$(basic_bank_thunk - FD80_FILE_BASE), %si
+	movw	$BASIC_THUNK, %di
+	movw	$(basic_bank_thunk_end - basic_bank_thunk), %cx
+	rep	movsb
+	ljmp	$0x0000, $BASIC_THUNK
+
+basic_bank_thunk:
+	movw	$ROM_BANK_PORT, %dx
+	movb	$BASIC_BANK_SELECT, %al
+	outb	%al, %dx
+	movw	$0xf800, %ax
+	movw	%ax, %ds
+	cmpw	$0x4350, 0x0040
+	jne	1f
+	cmpw	$0x3839, 0x0042
+	jne	1f
+	cmpw	$0x4142, 0x0044
+	jne	1f
+	cmpw	$0x3153, 0x0046
+	jne	1f
+	ljmp	$0xf800, $0x0000
+1:
+	movw	$ROM_BANKFLIP_PORT, %dx
+	movb	$0x02, %al
+	outb	%al, %dx
+	ljmp	$BIOS_SEG, $(basic_missing - FD80_FILE_BASE)
+basic_bank_thunk_end:
 
 /*
  * Select the internal IDE option ROM in the D8000 window.
@@ -356,6 +415,36 @@ select_ide_rom:
 	outb	%al, %dx
 	popw	%dx
 	popl	%eax
+	ret
+
+/*
+ * The PC-9801-92 ROM is a conventional C-Bus option ROM at D2000h.  Its
+ * header has the 55h AAh signature at offset 9 and a far-callable
+ * initialisation entry at offset 0.  Initialisation installs the common
+ * SCSI BIOS dispatcher used by DOS drivers; the boot entry at offset 15h is
+ * invoked separately after the built-in IDE path has failed.
+ */
+scsi_rom_init:
+	call	scsi_rom_present
+	jnc	1f
+	lcall	$SCSI_ROM_SEG, $0x0000
+1:
+	ret
+
+scsi_rom_present:
+	pushw	%ax
+	pushw	%es
+	movw	$SCSI_ROM_SEG, %ax
+	movw	%ax, %es
+	cmpw	$0xaa55, %es:0x0009
+	jne	1f
+	stc
+	jmp	2f
+1:
+	clc
+2:
+	popw	%es
+	popw	%ax
 	ret
 
 install_vectors:

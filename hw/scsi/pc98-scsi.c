@@ -39,6 +39,7 @@
 #define PC98_SCSI_DEFAULT_ROM  "pc98scsi.bin"
 #define PC98_SCSI_LEGACY_ROM   "SCSIBIOS.ROM"
 #define PC98_SCSI_IRQ_DELAY_NS  100000
+#define PC98_MODE_PAGE_FORMAT_DEVICE 0x03
 
 /* WD33C93 registers */
 enum {
@@ -323,6 +324,88 @@ static void pc98_scsi_start_data(Pc98ScsiState *s)
     }
 }
 
+/*
+ * The PC-9801-92 common BIOS derives its fixed-disk geometry from both
+ * MODE SENSE page 3 (Format Device) and page 4 (Rigid Disk Geometry).
+ * QEMU's image-backed scsi-hd supplies page 4 but not page 3, leaving the
+ * BIOS with zero heads/sectors and therefore no bootable fixed disk.
+ *
+ * Keep this legacy response synthesis in the PC-98 HBA.  A real SG_IO
+ * device receives its native response unchanged, as does a CD-ROM.
+ */
+static void pc98_scsi_patch_mode_sense_geometry(SCSIRequest *req,
+                                                uint8_t *buf, uint32_t len)
+{
+    uint8_t block_desc[8];
+    uint8_t geometry_page[24];
+    uint32_t block_size;
+    uint32_t off;
+    uint32_t page_len;
+    uint32_t sectors;
+    bool found = false;
+
+    if (req->cmd.buf[0] != MODE_SENSE ||
+        (req->cmd.buf[2] & 0x3f) != 0x3f ||
+        req->dev->type != TYPE_DISK ||
+        blk_is_sg(req->dev->conf.blk) ||
+        len < 64 || buf[3] != sizeof(block_desc)) {
+        return;
+    }
+
+    memcpy(block_desc, buf + 4, sizeof(block_desc));
+    off = 4 + buf[3];
+    while (off + 2 <= len) {
+        page_len = buf[off + 1] + 2;
+        if (page_len < 2 || off + page_len > len) {
+            break;
+        }
+        if ((buf[off] & 0x3f) == MODE_PAGE_HD_GEOMETRY &&
+            page_len == sizeof(geometry_page)) {
+            memcpy(geometry_page, buf + off, sizeof(geometry_page));
+            found = true;
+            break;
+        }
+        off += page_len;
+    }
+    if (!found) {
+        return;
+    }
+
+    sectors = req->dev->conf.secs ?: 63;
+    block_size = req->dev->conf.logical_block_size ?: 512;
+
+    /*
+     * The legacy BIOS expects a compact 64-byte sequence: page 1 with a
+     * six-byte body, page 3 with a 22-byte body, then the NEC-compatible
+     * 18-byte form of page 4.  The standard QEMU page 4 has a 22-byte body.
+     */
+    memset(buf, 0, 64);
+    buf[0] = 63;
+    buf[3] = sizeof(block_desc);
+    memcpy(buf + 4, block_desc, sizeof(block_desc));
+
+    buf[12] = MODE_PAGE_R_W_ERROR;
+    buf[13] = 0x06;
+    buf[14] = 0x80;
+
+    buf[20] = PC98_MODE_PAGE_FORMAT_DEVICE;
+    buf[21] = 0x16;
+    /* The common BIOS keeps its fixed-disk flag with the logical heads. */
+    buf[23] = 0x80 | MIN(req->dev->conf.heads ?: 16, 0x7f);
+    buf[30] = sectors >> 8;
+    buf[31] = sectors;
+    buf[32] = block_size >> 8;
+    buf[33] = block_size;
+    buf[35] = 1;
+
+    buf[44] = MODE_PAGE_HD_GEOMETRY;
+    buf[45] = 0x12;
+    memcpy(buf + 46, geometry_page + 2, 4);
+    memcpy(buf + 50, geometry_page + 6, 6);
+    memcpy(buf + 56, geometry_page + 12, 2);
+    memcpy(buf + 58, geometry_page + 14, 3);
+}
+
 static void pc98_scsi_transfer_data(SCSIRequest *req, uint32_t len)
 {
     Pc98ScsiState *s = req->hba_private;
@@ -333,9 +416,11 @@ static void pc98_scsi_transfer_data(SCSIRequest *req, uint32_t len)
     }
     s->async_buf = scsi_req_get_buf(req);
     s->async_len = len;
+    pc98_scsi_patch_mode_sense_geometry(req, s->async_buf, len);
     trace_pc98_scsi_transfer(req->cmd.buf[0], len,
                              len ? s->async_buf[0] : 0,
                              len > 1 ? s->async_buf[1] : 0,
+                             req->cmd.buf[2],
                              req->cmd.buf[4]);
     if (len >= 36 && req->cmd.buf[0] == INQUIRY &&
         !(req->cmd.buf[1] & 0x01)) {
@@ -472,6 +557,19 @@ static void pc98_scsi_submit(Pc98ScsiState *s, const uint8_t *cdb,
         memset(effective_cdb, 0, cdb_len);
         cdb_len = 6;
     }
+    /*
+     * This SCSI-1 BIOS does not recover from a power-on Unit Attention on
+     * image-backed fixed disks.  It leaves the target in its exclusion
+     * bitmap even though the following geometry commands succeed.  Legacy
+     * disks presented by this board are ready at power-on, so clear only
+     * the emulated Unit Attention before TEST UNIT READY.  Real SG_IO
+     * devices retain their native reset and media-change reporting.
+     */
+    if (!blk_is_sg(dev->conf.blk) && dev->type == TYPE_DISK &&
+        effective_cdb[0] == TEST_UNIT_READY) {
+        dev->unit_attention = SENSE_CODE(NO_SENSE);
+        s->bus.unit_attention = SENSE_CODE(NO_SENSE);
+    }
 
     s->req = scsi_req_new(dev, 0, lun, effective_cdb, cdb_len, s);
     datalen = scsi_req_enqueue(s->req);
@@ -569,25 +667,23 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
             pc98_scsi_start_data(s);
         } else if (s->phase == PHASE_STATUS_IN) {
             /*
-             * A synchronous image backend can complete the request while
-             * the guest is still transferring the final data byte.  The
-             * first following TRANSFER INFO can therefore arrive before
-             * the STATUS IN service interrupt was observed.  Replay that
-             * interrupt once; after its CSR is read, advance to MESSAGE IN.
+             * The phase interrupt only announces STATUS IN.  TRANSFER INFO
+             * then exposes the status byte through the data register; the
+             * read advances to MESSAGE IN and raises that phase interrupt.
+             * Advancing here would leave DBR clear, so the PC-9801-92 ROM
+             * would skip the byte and interpret stale stack data as target
+             * status.
              */
             if (s->status_irq_unread) {
                 pc98_scsi_raise_irq(s, CSR_STATUS_IN);
             } else {
-                s->phase = PHASE_MSG_IN;
-                s->msg_irq_unread = true;
-                pc98_scsi_raise_irq(s, CSR_MSG_IN);
+                s->asr |= ASR_DBR | ASR_BSY;
             }
         } else if (s->phase == PHASE_MSG_IN) {
             if (s->msg_irq_unread) {
                 pc98_scsi_raise_irq(s, CSR_MSG_IN);
             } else {
-                s->phase = PHASE_IDLE;
-                pc98_scsi_raise_irq(s, CSR_DISCONNECT);
+                s->asr |= ASR_DBR | ASR_BSY;
             }
         } else {
             s->asr |= ASR_DBR | ASR_BSY;
@@ -676,6 +772,7 @@ static void pc98_scsi_data_write(Pc98ScsiState *s, uint8_t value)
                 return;
             }
         }
+        trace_pc98_scsi_cdb_byte(value, s->cdb_pos, s->cdb_len);
         s->cdb[s->cdb_pos++] = value;
         if (s->cdb_pos == s->cdb_len) {
             s->asr &= ~ASR_DBR;

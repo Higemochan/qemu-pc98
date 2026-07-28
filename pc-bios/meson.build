@@ -70,6 +70,7 @@ blobs = [
   'pc98ide.bin',
   'pc98pci.bin',
   'pc98bios.bin',
+  'pc98basic.bin',
   'pc98font.bin',
   's390-ccw.img',
   'slof.bin',

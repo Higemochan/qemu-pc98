@@ -402,5 +402,6 @@ pc98_scsi_irq_schedule(uint8_t csr, uint8_t asr, uint8_t membank, bool enabled) 
 pc98_scsi_irq_fire(uint8_t csr, uint8_t asr, uint8_t membank) "csr=0x%02x asr=0x%02x membank=0x%02x"
 pc98_scsi_target_lun_write(uint8_t value, uint8_t lun) "value=0x%02x lun=%u"
 pc98_scsi_message_out(uint8_t value, uint8_t lun) "value=0x%02x lun=%u"
+pc98_scsi_cdb_byte(uint8_t value, unsigned int pos, unsigned int len) "value=0x%02x pos=%u len=%u"
 pc98_scsi_inquiry(int target, int lun, uint8_t type, bool removable, const char *vendor, const char *product) "target=%d lun=%d type=0x%02x removable=%d vendor='%.8s' product='%.16s'"
-pc98_scsi_transfer(uint8_t opcode, uint32_t len, uint8_t byte0, uint8_t byte1, uint8_t cdb4) "opcode=0x%02x len=%u byte0=0x%02x byte1=0x%02x cdb4=0x%02x"
+pc98_scsi_transfer(uint8_t opcode, uint32_t len, uint8_t byte0, uint8_t byte1, uint8_t cdb2, uint8_t cdb4) "opcode=0x%02x len=%u byte0=0x%02x byte1=0x%02x cdb2=0x%02x cdb4=0x%02x"

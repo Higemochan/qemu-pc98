@@ -36,6 +36,16 @@
 #define PC98_FDC_MSR       0x0090
 #define PC98_FDC_FIFO      0x0092
 
+#define PC98_ROM_BANK_PORT    0x043f
+#define PC98_ROM_WINDOW       0xf8000
+#define PC98_BASIC_BANK_SEL   0xe4
+#define PC98_BASIC_MAGIC_OFF  0x0040
+
+#define PC98_PCM_CLOCK_PORT   0xa466
+#define PC98_PCM_FIFO_PORT    0xa468
+#define PC98_PCM_DACTRL_PORT  0xa46a
+#define PC98_PCM_DATA_PORT    0xa46c
+
 #define FDC_MSR_DRV0_BUSY  0x01
 #define FDC_MSR_CMD_BUSY   0x10
 #define FDC_MSR_DIO        0x40
@@ -135,6 +145,58 @@ static void test_pc98_fdc_empty_read_id(void)
     g_assert_cmphex(result[1], ==, FDC_ST1_NO_DATA);
     g_assert_cmphex(result[2], ==, 0x00);
     g_assert_cmphex(qtest_inb(qts, PC98_FDC_MSR), ==, FDC_MSR_RQM);
+
+    qtest_quit(qts);
+}
+
+static void test_pc98_basic_rom_bank(void)
+{
+    static const uint8_t expected[] = "PC98BAS1";
+    QTestState *qts;
+    uint8_t magic[sizeof(expected) - 1];
+
+    qts = qtest_init(
+        "-machine pc9801 -nodefaults -display none");
+
+    qtest_outb(qts, PC98_ROM_BANK_PORT, PC98_BASIC_BANK_SEL);
+    qtest_memread(qts, PC98_ROM_WINDOW + PC98_BASIC_MAGIC_OFF,
+                  magic, sizeof(magic));
+    g_assert_cmpmem(magic, sizeof(magic), expected, sizeof(expected) - 1);
+
+    qtest_quit(qts);
+}
+
+static void test_pc98_opna_pcm_fifo_irq(void)
+{
+    QTestState *qts;
+    int i;
+
+    qts = qtest_init(
+        "-machine pc9821 -nodefaults -display none "
+        "-audiodev none,id=snd0 -device pc98-opna,audiodev=snd0");
+
+    /* Reset FIFO, select signed 16-bit stereo and a 128-byte watermark. */
+    qtest_outb(qts, PC98_PCM_FIFO_PORT, 0x08);
+    qtest_outb(qts, PC98_PCM_DACTRL_PORT, 0x32);
+    qtest_outb(qts, PC98_PCM_FIFO_PORT, 0x26);
+    qtest_outb(qts, PC98_PCM_DACTRL_PORT, 0x00);
+    qtest_outb(qts, PC98_PCM_FIFO_PORT, 0xa6);
+
+    for (i = 0; i < 256; i++) {
+        qtest_outb(qts, PC98_PCM_DATA_PORT, i);
+    }
+    g_assert_cmphex(qtest_inb(qts, PC98_PCM_CLOCK_PORT) & 0xc0, ==, 0);
+
+    /*
+     * 0xA6 selects 5501.25 Hz.  Advancing 100 ms drains the test data,
+     * crosses the watermark and latches the shared IRQ12 request.
+     */
+    qtest_clock_step(qts, 100 * 1000 * 1000);
+    g_assert_cmphex(qtest_inb(qts, PC98_PCM_CLOCK_PORT) & 0x40, ==, 0x40);
+    g_assert_cmphex(qtest_inb(qts, PC98_PCM_FIFO_PORT) & 0x10, ==, 0x10);
+
+    qtest_outb(qts, PC98_PCM_FIFO_PORT, 0xa6);
+    g_assert_cmphex(qtest_inb(qts, PC98_PCM_FIFO_PORT) & 0x10, ==, 0);
 
     qtest_quit(qts);
 }
@@ -342,6 +404,10 @@ int main(int argc, char **argv)
                    test_pc98_lgy98_port_map);
     qtest_add_func("/pc98/fdc/empty-read-id",
                    test_pc98_fdc_empty_read_id);
+    qtest_add_func("/pc98/basic/rom-bank",
+                   test_pc98_basic_rom_bank);
+    qtest_add_func("/pc98/opna/pcm-fifo-irq",
+                   test_pc98_opna_pcm_fifo_irq);
     qtest_add_func("/pc98/vvfat98/boot-layout",
                    test_pc98_vvfat_boot_layout);
 

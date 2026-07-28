@@ -82,6 +82,7 @@
 enum {
     BANK_PCI      = 0,
     BANK_APIC     = 1,     /* not mapped yet */
+    BANK_BASIC    = 2,     /* free ROM BASIC compatibility stub */
     BANK_IDE      = 3,
     BANK_ITF      = 4,
     BANK_BIOS     = 5,     /* main BIOS spans banks 5..7 (96 KiB) */
@@ -90,6 +91,8 @@ enum {
 
 #define ROM_PCI_FILE    "pc98pci.bin"
 #define ROM_PCI_BYTES   0x8000
+#define ROM_BASIC_FILE  "pc98basic.bin"
+#define ROM_BASIC_BYTES 0x8000
 #define ROM_IDE_FILE    "pc98ide.bin"
 #define ROM_IDE_BYTES   0x2000
 #define ROM_ITF_FILE    "pc98itf.bin"
@@ -99,6 +102,7 @@ enum {
 #define ROM_BANK_FILE   "pc98bank%d.bin"
 
 #define OFF_PCI         (ROM_BANK_BYTES * BANK_PCI)
+#define OFF_BASIC       (ROM_BANK_BYTES * BANK_BASIC)
 #define OFF_IDE         (ROM_BANK_BYTES * BANK_IDE)
 #define OFF_ITF         (ROM_BANK_BYTES * BANK_ITF)
 #define OFF_BIOS        (ROM_BANK_BYTES * BANK_BIOS)
@@ -845,6 +849,10 @@ static bool mem_load_firmware(Pc98MemState *s, uint8_t *buf)
     if (!(found & (1 << BANK_PCI)) &&
         read_rom_image(ROM_PCI_FILE, buf + OFF_PCI, ROM_PCI_BYTES)) {
         found |= (1 << BANK_PCI);
+    }
+    if (!(found & (1 << BANK_BASIC)) &&
+        read_rom_image(ROM_BASIC_FILE, buf + OFF_BASIC, ROM_BASIC_BYTES)) {
+        found |= (1 << BANK_BASIC);
     }
     if (!(found & (1 << BANK_IDE)) &&
         read_rom_image(ROM_IDE_FILE, buf + OFF_IDE, ROM_IDE_BYTES)) {
