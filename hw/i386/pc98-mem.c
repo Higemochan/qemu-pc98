@@ -358,6 +358,14 @@ static void mem_apply_sys16m(Pc98MemState *s)
     memory_region_transaction_commit();
 }
 
+static void mem_sync_sys16m_workarea(Pc98MemState *s)
+{
+    uint8_t *ram = memory_region_get_ram_ptr(s->ram);
+
+    /* 1-16 MiB extended RAM, in 128 KiB units. */
+    ram[0x401] = s->sys16m ? 0x70 : 0x78;
+}
+
 /*
  * 0xd8000 window.  When the IDE selection is active and enabled, the IDE BIOS
  * option ROM appears at 0xd8000 (0x2000); its work RAM is paged in at 0xda000
@@ -459,11 +467,11 @@ void pc98_mem_set_a20_wrap(void *opaque, bool wrap)
 /* fill in the BIOS work area when the writable BIOS RAM copy is paged in */
 static void mem_patch_bios_workarea(Pc98MemState *s)
 {
-    uint8_t *ram = memory_region_get_ram_ptr(s->ram);
+    uint8_t *ram;
     uint16_t ext_mb;
 
-    /* memory size */
-    ram[0x401] = s->sys16m ? 0x70 : 0x78;
+    mem_sync_sys16m_workarea(s);
+    ram = memory_region_get_ram_ptr(s->ram);
     ext_mb = (s->ram_size - 0x1000000) >> 20;
     ram[0x594] = ext_mb & 0xff;
     ram[0x595] = ext_mb >> 8;
@@ -535,6 +543,7 @@ static void mem_sys16m_write(void *opaque, uint32_t addr, uint32_t data)
         s->sys16m = enable;
         mem_apply_sys16m(s);
     }
+    mem_sync_sys16m_workarea(s);
 }
 
 static uint32_t mem_sys16m_read(void *opaque, uint32_t addr)
@@ -961,6 +970,7 @@ static int pc98_mem_post_load(void *opaque, int version_id)
     mem_apply_window(s, 0);
     mem_apply_window(s, 1);
     mem_apply_sys16m(s);
+    mem_sync_sys16m_workarea(s);
     mem_apply_dwin(s);
     mem_apply_cbus_rom_gate(s, s->cbus_rom_gate);
     memory_region_set_enabled(&s->e8000_ram, s->bios_ram_gate);
