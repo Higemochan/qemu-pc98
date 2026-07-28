@@ -112,10 +112,9 @@ struct Pc98MachineClass {
     bool has_coregraph; /* PCI Core-Graph with a non-PnP Cirrus child */
 };
 
-#define TYPE_PC98_MACHINE     MACHINE_TYPE_NAME("pc98")
-#define TYPE_PC98_PCI_MACHINE MACHINE_TYPE_NAME("pc98-pci")
-#define TYPE_PC9801_MACHINE    MACHINE_TYPE_NAME("pc9801")
-#define TYPE_PC9821_MACHINE    MACHINE_TYPE_NAME("pc9821")
+#define TYPE_PC98_MACHINE   MACHINE_TYPE_NAME("pc98")
+#define TYPE_PC9801_MACHINE MACHINE_TYPE_NAME("pc9801")
+#define TYPE_PC9821_MACHINE MACHINE_TYPE_NAME("pc9821")
 OBJECT_DECLARE_TYPE(Pc98MachineState, Pc98MachineClass, PC98_MACHINE)
 
 /*
@@ -532,39 +531,6 @@ static void pc98_class_init(ObjectClass *oc, const void *data)
     pmc->has_pegc = true;
     pmc->has_coregraph = false;
 
-    compat_props_add(mc->compat_props, pc98_compat_props,
-                     G_N_ELEMENTS(pc98_compat_props));
-}
-
-/*
- * pc98-pci: PCI-equipped PC-9821 (e.g. Xa7/C9W).  Adds the PCI host
- * bridge; the firmware directory supplied via -L must hold the PCI ROM
- * set (pc98bank0.bin..pc98bank7.bin plus pc98font.bin).  Core-Graph is
- * not modelled yet, so the Windows Cirrus driver falls back to WAB.
- */
-static void pc98_pci_class_init(ObjectClass *oc, const void *data)
-{
-    MachineClass *mc = MACHINE_CLASS(oc);
-    Pc98MachineClass *pmc = PC98_MACHINE_CLASS(oc);
-
-    mc->desc = "NEC PC-9821 (PCI)";
-    /*
-     * The real PCI-equipped PC-9821 (Xa7/C9W) is a Pentium machine, but its
-     * firmware does not boot yet (memory-map bring-up pending), and the BX2
-     * ROM's ITF cache self-test halts on a Pentium.  Keep the base 486 default
-     * for now so pc98-pci boots the existing images; switch to "pentium" once
-     * the Xa7 firmware is brought up.
-     */
-
-    pmc->has_pci = true;
-
-    /*
-     * compat_props are not inherited: machine_class_base_init() gives every
-     * derived machine a fresh, empty array.  Re-add the PC-98 A20 semantics
-     * (1 MiB address wrap) that the base pc98 class installs.
-     */
-    compat_props_add(mc->compat_props, pc98_compat_props,
-                     G_N_ELEMENTS(pc98_compat_props));
 }
 
 /*
@@ -597,7 +563,9 @@ static void pc9821_class_init(ObjectClass *oc, const void *data)
     Pc98MachineClass *pmc = PC98_MACHINE_CLASS(oc);
 
     mc->desc = "NEC PC-9821";
+    pmc->has_pci = true;
     pmc->has_wab = false;
+    pmc->has_pegc = true;
     pmc->has_coregraph = true;
 
     compat_props_add(mc->compat_props, pc98_compat_props,
@@ -611,11 +579,7 @@ static const TypeInfo pc98_machine_types[] = {
         .instance_size = sizeof(Pc98MachineState),
         .class_size    = sizeof(Pc98MachineClass),
         .class_init    = pc98_class_init,
-    },
-    {
-        .name          = TYPE_PC98_PCI_MACHINE,
-        .parent        = TYPE_PC98_MACHINE,
-        .class_init    = pc98_pci_class_init,
+        .abstract      = true,
     },
     {
         .name          = TYPE_PC9801_MACHINE,
@@ -624,7 +588,7 @@ static const TypeInfo pc98_machine_types[] = {
     },
     {
         .name          = TYPE_PC9821_MACHINE,
-        .parent        = TYPE_PC98_PCI_MACHINE,
+        .parent        = TYPE_PC98_MACHINE,
         .class_init    = pc9821_class_init,
     },
 };

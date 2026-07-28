@@ -45,6 +45,7 @@
 #define PC98_PCM_FIFO_PORT    0xa468
 #define PC98_PCM_DACTRL_PORT  0xa46a
 #define PC98_PCM_DATA_PORT    0xa46c
+#define PC98_SLAVE_PIC_CMD    0x0008
 
 #define FDC_MSR_DRV0_BUSY  0x01
 #define FDC_MSR_CMD_BUSY   0x10
@@ -194,6 +195,8 @@ static void test_pc98_opna_pcm_fifo_irq(void)
     qtest_clock_step(qts, 100 * 1000 * 1000);
     g_assert_cmphex(qtest_inb(qts, PC98_PCM_CLOCK_PORT) & 0x40, ==, 0x40);
     g_assert_cmphex(qtest_inb(qts, PC98_PCM_FIFO_PORT) & 0x10, ==, 0x10);
+    qtest_outb(qts, PC98_SLAVE_PIC_CMD, 0x0a); /* OCW3: read IRR */
+    g_assert_cmphex(qtest_inb(qts, PC98_SLAVE_PIC_CMD) & 0x10, ==, 0x10);
 
     qtest_outb(qts, PC98_PCM_FIFO_PORT, 0xa6);
     g_assert_cmphex(qtest_inb(qts, PC98_PCM_FIFO_PORT) & 0x10, ==, 0);

@@ -76,6 +76,14 @@
 #define PC98_PCM_CLOCK_PORT     0xa466
 #define PC98_PCM_FIFO_PORT      0xa468
 #define PC98_PCM_DACTRL_PORT    0xa46a
+#define PC98_PCM_DATA_PORT      0xa46c
+#define PC98_PCM_BUFFER_SIZE    0x8000
+#define PC98_PCM_BUFFER_MASK    (PC98_PCM_BUFFER_SIZE - 1)
+
+/* Sample clock is eight times the actual PCM sample rate. */
+static const uint32_t pc98_pcm_clock_rate[8] = {
+    352800, 264600, 176400, 132300, 88200, 66150, 44010, 33075,
+};
 
 /* On-board ADPCM-B DRAM and rhythm ADPCM-A sample ROM. */
 #define PC98_OPNA_ADPCM_RAM     (256 * 1024)
@@ -108,6 +116,17 @@ struct Pc98OpnaState {
     uint8_t sound_id;           /* 0xA460 read value          */
     uint8_t pcm_fifo;           /* 0xA468 FIFO control        */
     uint8_t pcm_dactrl;         /* 0xA46A data format         */
+    uint8_t pcm_volume;         /* 0xA466, inverted 4-bit     */
+    uint8_t pcm_buffer[PC98_PCM_BUFFER_SIZE];
+    uint16_t pcm_read_pos;
+    uint16_t pcm_write_pos;
+    uint32_t pcm_count;
+    uint32_t pcm_threshold;
+    uint64_t pcm_phase;
+    int16_t pcm_last_l;
+    int16_t pcm_last_r;
+    bool pcm_irq_pending;
+    bool pcm_irq_armed;
     bool active;
     uint8_t addr_latch[2];
     uint8_t reg_shadow[512];
@@ -172,7 +191,7 @@ static void opna_irq_handler(void *param, uint8_t level)
 
     s->irq_level = !!level;
     trace_pc98_opna_irq(level);
-    qemu_set_irq(s->irq, level ? 1 : 0);
+    qemu_set_irq(s->irq, s->irq_level || s->pcm_irq_pending);
 }
 
 /*
@@ -225,6 +244,109 @@ static inline int16_t opna_clip(int32_t v)
     return v;
 }
 
+static unsigned opna_pcm_frame_bytes(Pc98OpnaState *s)
+{
+    static const uint8_t frame_bytes[8] = { 2, 2, 2, 4, 1, 1, 1, 2 };
+
+    return frame_bytes[(s->pcm_dactrl >> 4) & 7];
+}
+
+static uint8_t opna_pcm_pop_byte(Pc98OpnaState *s)
+{
+    uint8_t val = s->pcm_buffer[s->pcm_read_pos];
+
+    s->pcm_read_pos = (s->pcm_read_pos + 1) & PC98_PCM_BUFFER_MASK;
+    s->pcm_count--;
+    return val;
+}
+
+static int16_t opna_pcm_pop_16(Pc98OpnaState *s)
+{
+    unsigned hi = opna_pcm_pop_byte(s);
+    unsigned lo = opna_pcm_pop_byte(s);
+
+    return (int16_t)((hi << 8) | lo);
+}
+
+static int16_t opna_pcm_pop_8(Pc98OpnaState *s)
+{
+    return (int16_t)(int8_t)opna_pcm_pop_byte(s) << 8;
+}
+
+static void opna_pcm_update_irq(Pc98OpnaState *s, bool level)
+{
+    if (s->pcm_irq_pending == level) {
+        return;
+    }
+    s->pcm_irq_pending = level;
+    trace_pc98_opna_pcm_irq(level, s->pcm_count, s->pcm_threshold);
+    qemu_set_irq(s->irq, s->irq_level || s->pcm_irq_pending);
+}
+
+static void opna_pcm_consume(Pc98OpnaState *s)
+{
+    unsigned format = (s->pcm_dactrl >> 4) & 7;
+    unsigned frame_bytes = opna_pcm_frame_bytes(s);
+    int16_t l = 0;
+    int16_t r = 0;
+
+    if (s->pcm_count >= frame_bytes) {
+        switch (format) {
+        case 1:                         /* 16-bit right */
+            r = opna_pcm_pop_16(s);
+            break;
+        case 2:                         /* 16-bit left */
+            l = opna_pcm_pop_16(s);
+            break;
+        case 3:                         /* 16-bit stereo */
+            l = opna_pcm_pop_16(s);
+            r = opna_pcm_pop_16(s);
+            break;
+        case 5:                         /* 8-bit right */
+            r = opna_pcm_pop_8(s);
+            break;
+        case 6:                         /* 8-bit left */
+            l = opna_pcm_pop_8(s);
+            break;
+        case 7:                         /* 8-bit stereo */
+            l = opna_pcm_pop_8(s);
+            r = opna_pcm_pop_8(s);
+            break;
+        default:                        /* output disabled */
+            while (frame_bytes--) {
+                opna_pcm_pop_byte(s);
+            }
+            break;
+        }
+    }
+
+    s->pcm_last_l = l;
+    s->pcm_last_r = r;
+    if ((s->pcm_fifo & 0x20) && s->pcm_irq_armed &&
+        s->pcm_count <= s->pcm_threshold) {
+        s->pcm_irq_armed = false;
+        opna_pcm_update_irq(s, true);
+    }
+}
+
+static void opna_pcm_render(Pc98OpnaState *s, int32_t *l, int32_t *r)
+{
+    uint32_t rate;
+
+    if (!(s->pcm_fifo & 0x80)) {
+        return;
+    }
+
+    rate = pc98_pcm_clock_rate[s->pcm_fifo & 7] / 8;
+    s->pcm_phase += rate;
+    while (s->pcm_phase >= s->freq) {
+        s->pcm_phase -= s->freq;
+        opna_pcm_consume(s);
+    }
+    *l += s->pcm_last_l * s->pcm_volume / 15;
+    *r += s->pcm_last_r * s->pcm_volume / 15;
+}
+
 static void opna_callback(void *opaque, int free_bytes)
 {
     Pc98OpnaState *s = opaque;
@@ -250,6 +372,7 @@ static void opna_callback(void *opaque, int free_bytes)
                 l += p;
                 r += p;
             }
+            opna_pcm_render(s, &l, &r);
             s->mix[2 * i]     = opna_clip(l);
             s->mix[2 * i + 1] = opna_clip(r);
         }
@@ -333,14 +456,9 @@ static const MemoryRegionPortio pc98_opna_id_portio[] = {
  * Returning an open bus therefore hangs Windows even when no sound is being
  * played.
  *
- * Model the control/status portion of the FIFO for device discovery.  PCM
- * sample output and FIFO interrupts can be added independently; until then
- * the FIFO remains empty (bit 6) and writes to its data port are discarded.
+ * The sample-rate selector is expressed as eight times the actual sample
+ * rate.  It is also the clock observed by software at bit 0 of 0xA466.
  */
-static const uint32_t pc98_pcm_clock_rate[8] = {
-    352800, 264600, 176400, 132300, 88200, 66150, 44010, 33075,
-};
-
 static uint32_t opna_pcm_read(void *opaque, uint32_t addr)
 {
     Pc98OpnaState *s = opaque;
@@ -351,11 +469,18 @@ static uint32_t opna_pcm_read(void *opaque, uint32_t addr)
         uint32_t rate = pc98_pcm_clock_rate[s->pcm_fifo & 7];
         uint8_t phase = muldiv64(now, rate * 2,
                                  NANOSECONDS_PER_SECOND) & 1;
+        unsigned frame_bytes = opna_pcm_frame_bytes(s);
 
-        return 0x40 | phase;     /* FIFO empty plus sample-clock phase */
+        if (s->pcm_count >= PC98_PCM_BUFFER_SIZE) {
+            phase |= 0x80;
+        } else if (s->pcm_count < frame_bytes) {
+            phase |= 0x40;
+        }
+        return phase;
     }
     case PC98_PCM_FIFO_PORT:
-        return s->pcm_fifo & ~0x10;
+        return (s->pcm_fifo & ~0x10) |
+               (s->pcm_irq_pending ? 0x10 : 0);
     case PC98_PCM_DACTRL_PORT:
         return s->pcm_dactrl;
     default:
@@ -367,12 +492,49 @@ static void opna_pcm_write(void *opaque, uint32_t addr, uint32_t val)
 {
     Pc98OpnaState *s = opaque;
 
+    val &= 0xff;
     switch (addr) {
+    case PC98_PCM_CLOCK_PORT:
+        if ((val & 0xe0) == 0xa0) {
+            s->pcm_volume = (~val) & 0x0f;
+        }
+        break;
     case PC98_PCM_FIFO_PORT:
-        s->pcm_fifo = val;
+        if ((val & 0x08) && !(s->pcm_fifo & 0x08)) {
+            s->pcm_read_pos = 0;
+            s->pcm_write_pos = 0;
+            s->pcm_count = 0;
+            s->pcm_phase = 0;
+            s->pcm_last_l = 0;
+            s->pcm_last_r = 0;
+            s->pcm_irq_armed = false;
+        }
+        if (!(val & 0x10)) {
+            opna_pcm_update_irq(s, false);
+        }
+        s->pcm_fifo = val & ~0x10;
+        if (val & 0x80) {
+            s->active = true;
+            audio_be_set_active_out(s->audio_be, s->voice, 1);
+        }
         break;
     case PC98_PCM_DACTRL_PORT:
-        s->pcm_dactrl = val;
+        if (s->pcm_fifo & 0x20) {
+            s->pcm_threshold = val == 0xff ? 0x7ffc : (val + 1) << 7;
+        } else if ((val & 0x0f) != 0x0f) {
+            s->pcm_dactrl = val;
+        }
+        break;
+    case PC98_PCM_DATA_PORT:
+        if (s->pcm_count < PC98_PCM_BUFFER_SIZE) {
+            s->pcm_buffer[s->pcm_write_pos] = val;
+            s->pcm_write_pos =
+                (s->pcm_write_pos + 1) & PC98_PCM_BUFFER_MASK;
+            s->pcm_count++;
+            s->pcm_irq_armed = true;
+            s->active = true;
+            audio_be_set_active_out(s->audio_be, s->voice, 1);
+        }
         break;
     default:
         break;
@@ -492,6 +654,17 @@ static void pc98_opna_reset(DeviceState *dev)
     s->sound_id = PC98_OPNA_SOUND_ID;
     s->pcm_fifo = 0;
     s->pcm_dactrl = 0x32;
+    s->pcm_volume = 15;
+    memset(s->pcm_buffer, 0, sizeof(s->pcm_buffer));
+    s->pcm_read_pos = 0;
+    s->pcm_write_pos = 0;
+    s->pcm_count = 0;
+    s->pcm_threshold = 0x80;
+    s->pcm_phase = 0;
+    s->pcm_last_l = 0;
+    s->pcm_last_r = 0;
+    s->pcm_irq_pending = false;
+    s->pcm_irq_armed = false;
     s->active = false;
     memset(s->addr_latch, 0, sizeof(s->addr_latch));
     memset(s->reg_shadow, 0, sizeof(s->reg_shadow));
@@ -517,6 +690,10 @@ static int pc98_opna_post_load(void *opaque, int version_id)
     unsigned reg;
     int i;
 
+    if (version_id < 2) {
+        s->pcm_volume = 15;
+        s->pcm_threshold = 0x80;
+    }
     for (i = 0; i < 2; i++) {
         pending[i] = timer_pending(s->timer[i]);
         expires[i] = timer_expire_time_ns(s->timer[i]);
@@ -544,20 +721,32 @@ static int pc98_opna_post_load(void *opaque, int version_id)
         }
     }
     s->irq_level = irq_level;
-    qemu_set_irq(s->irq, irq_level);
+    qemu_set_irq(s->irq, irq_level || s->pcm_irq_pending);
     audio_be_set_active_out(s->audio_be, s->voice, s->active);
     return 0;
 }
 
 static const VMStateDescription vmstate_pc98_opna = {
     .name = "pc98-opna",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = pc98_opna_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8(sound_id, Pc98OpnaState),
         VMSTATE_UINT8(pcm_fifo, Pc98OpnaState),
         VMSTATE_UINT8(pcm_dactrl, Pc98OpnaState),
+        VMSTATE_UINT8_V(pcm_volume, Pc98OpnaState, 2),
+        VMSTATE_UINT8_ARRAY_V(pcm_buffer, Pc98OpnaState,
+                              PC98_PCM_BUFFER_SIZE, 2),
+        VMSTATE_UINT16_V(pcm_read_pos, Pc98OpnaState, 2),
+        VMSTATE_UINT16_V(pcm_write_pos, Pc98OpnaState, 2),
+        VMSTATE_UINT32_V(pcm_count, Pc98OpnaState, 2),
+        VMSTATE_UINT32_V(pcm_threshold, Pc98OpnaState, 2),
+        VMSTATE_UINT64_V(pcm_phase, Pc98OpnaState, 2),
+        VMSTATE_INT16_V(pcm_last_l, Pc98OpnaState, 2),
+        VMSTATE_INT16_V(pcm_last_r, Pc98OpnaState, 2),
+        VMSTATE_BOOL_V(pcm_irq_pending, Pc98OpnaState, 2),
+        VMSTATE_BOOL_V(pcm_irq_armed, Pc98OpnaState, 2),
         VMSTATE_BOOL(active, Pc98OpnaState),
         VMSTATE_UINT8_ARRAY(addr_latch, Pc98OpnaState, 2),
         VMSTATE_UINT8_ARRAY(reg_shadow, Pc98OpnaState, 512),
