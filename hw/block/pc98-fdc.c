@@ -856,6 +856,7 @@ enum {
 enum {
     FD_SR1_MA       = 0x01, /* Missing address mark */
     FD_SR1_NW       = 0x02, /* Not writable */
+    FD_SR1_ND       = 0x04, /* No data */
     FD_SR1_EC       = 0x80, /* End of cylinder */
 };
 
@@ -1538,7 +1539,9 @@ static void fdctrl_to_command_phase(FDCtrl *fdctrl)
     fdctrl->data_dir = FD_DIR_WRITE;
     fdctrl->data_pos = 0;
     fdctrl->data_len = 1; /* Accept command byte, adjust for params later */
-    fdctrl->msr &= ~(FD_MSR_CMDBUSY | FD_MSR_DIO);
+    fdctrl->msr &= ~(FD_MSR_CMDBUSY | FD_MSR_DIO |
+                     FD_MSR_DRV0BUSY | FD_MSR_DRV1BUSY |
+                     FD_MSR_DRV2BUSY | FD_MSR_DRV3BUSY);
     fdctrl->msr |= FD_MSR_RQM;
 }
 
@@ -1551,6 +1554,16 @@ static void fdctrl_to_result_phase(FDCtrl *fdctrl, int fifo_len)
     fdctrl->data_len = fifo_len;
     fdctrl->data_pos = 0;
     fdctrl->msr |= FD_MSR_CMDBUSY | FD_MSR_RQM | FD_MSR_DIO;
+    if (fdctrl->pc98) {
+        /*
+         * A uPD765A reports the selected unit as busy throughout the
+         * result phase.  The PC-98 Windows floppy driver uses this bit
+         * when deciding whether it may drain the result bytes.
+         */
+        fdctrl->msr &= ~(FD_MSR_DRV0BUSY | FD_MSR_DRV1BUSY |
+                         FD_MSR_DRV2BUSY | FD_MSR_DRV3BUSY);
+        fdctrl->msr |= 1 << GET_CUR_DRV(fdctrl);
+    }
 }
 
 /* Set an error: unimplemented/unknown command */
@@ -2135,6 +2148,16 @@ static void fdctrl_handle_readid(FDCtrl *fdctrl, int direction)
     SET_CUR_DRV(fdctrl, fdctrl->fifo[1] & FD_DOR_SELMASK);
     cur_drv = get_cur_drv(fdctrl);
     cur_drv->head = (fdctrl->fifo[1] >> 2) & 1;
+    if (fdctrl->pc98 &&
+        (!cur_drv->blk || !blk_is_inserted(cur_drv->blk))) {
+        /*
+         * With no medium there is no ID address mark to return.  Treating
+         * this as a successful READ ID leaves the PC-98 Windows 9x driver
+         * waiting forever for a result that cannot describe a sector.
+         */
+        fdctrl_stop_transfer(fdctrl, FD_SR0_ABNTERM, FD_SR1_ND, 0x00);
+        return;
+    }
     timer_mod(fdctrl->result_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
              (NANOSECONDS_PER_SECOND / 50));
 }
@@ -2958,12 +2981,34 @@ static const Property pc98_fdc_properties[] = {
                         FloppyDriveType),
 };
 
+static int pc98_fdc_post_load(void *opaque, int version_id)
+{
+    Pc98FdcState *isa = opaque;
+    FDCtrl *fdctrl = &isa->state;
+
+    fdctrl->pc98 = 1;
+    fdctrl->pc98_force_ready = isa->force_ready;
+    if (isa->mode_reg & FDMODE_PORT_EXC) {
+        fdctrl->irq = isa->irq11;
+        fdctrl->dma_chann = 2;
+    } else {
+        fdctrl->irq = isa->irq10;
+        fdctrl->dma_chann = 3;
+    }
+
+    return 0;
+}
+
 static const VMStateDescription vmstate_pc98_fdc_dev = {
     .name = "pc98-fdc",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
+    .post_load = pc98_fdc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(state, Pc98FdcState, 0, pc98_vmstate_fdc, FDCtrl),
+        VMSTATE_UINT8_V(force_ready, Pc98FdcState, 3),
+        VMSTATE_UINT8_V(mode_reg, Pc98FdcState, 3),
+        VMSTATE_UINT8_V(mode144_reg, Pc98FdcState, 3),
         VMSTATE_END_OF_LIST()
     }
 };

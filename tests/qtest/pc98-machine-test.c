@@ -33,6 +33,18 @@
 #define LGY98_BOARD_ID_C   0x03dc
 #define LGY98_BOARD_ID_D   0x03dd
 
+#define PC98_FDC_MSR       0x0090
+#define PC98_FDC_FIFO      0x0092
+
+#define FDC_MSR_DRV0_BUSY  0x01
+#define FDC_MSR_CMD_BUSY   0x10
+#define FDC_MSR_DIO        0x40
+#define FDC_MSR_RQM        0x80
+
+#define FDC_CMD_READ_ID    0x4a
+#define FDC_ST0_ABNTERM    0x40
+#define FDC_ST1_NO_DATA    0x04
+
 #define E8390_STOP         0x01
 #define E8390_START        0x02
 #define E8390_NODMA        0x20
@@ -91,6 +103,38 @@ static void test_pc98_lgy98_port_map(void)
 
     g_assert_cmphex(qtest_inb(qts, LGY98_RESET), ==, 0x00);
     g_assert_cmphex(qtest_inb(qts, LGY98_ISR), ==, 0x80);
+
+    qtest_quit(qts);
+}
+
+static void test_pc98_fdc_empty_read_id(void)
+{
+    QTestState *qts;
+    uint8_t result[7];
+    int i;
+
+    qts = qtest_init(
+        "-machine pc9821 -nodefaults -display none");
+
+    /*
+     * Windows 9x probes an empty PC-98 floppy drive with READ ID.  A uPD765A
+     * reports an error result and keeps the selected unit's busy bit set
+     * while those seven result bytes are waiting to be drained.
+     */
+    g_assert_cmphex(qtest_inb(qts, PC98_FDC_MSR), ==, FDC_MSR_RQM);
+    qtest_outb(qts, PC98_FDC_FIFO, FDC_CMD_READ_ID);
+    qtest_outb(qts, PC98_FDC_FIFO, 0x00);
+
+    g_assert_cmphex(qtest_inb(qts, PC98_FDC_MSR), ==,
+                    FDC_MSR_RQM | FDC_MSR_DIO | FDC_MSR_CMD_BUSY |
+                    FDC_MSR_DRV0_BUSY);
+    for (i = 0; i < G_N_ELEMENTS(result); i++) {
+        result[i] = qtest_inb(qts, PC98_FDC_FIFO);
+    }
+    g_assert_cmphex(result[0], ==, FDC_ST0_ABNTERM);
+    g_assert_cmphex(result[1], ==, FDC_ST1_NO_DATA);
+    g_assert_cmphex(result[2], ==, 0x00);
+    g_assert_cmphex(qtest_inb(qts, PC98_FDC_MSR), ==, FDC_MSR_RQM);
 
     qtest_quit(qts);
 }
@@ -296,6 +340,8 @@ int main(int argc, char **argv)
                    test_pc9821_has_pci_coregraph);
     qtest_add_func("/pc98/lgy98/port-map",
                    test_pc98_lgy98_port_map);
+    qtest_add_func("/pc98/fdc/empty-read-id",
+                   test_pc98_fdc_empty_read_id);
     qtest_add_func("/pc98/vvfat98/boot-layout",
                    test_pc98_vvfat_boot_layout);
 
