@@ -195,14 +195,12 @@ cold_start:
 
 	call	install_vectors
 	/*
-	 * Select the uPD4990A-compatible 48-bit serial calendar format used by
-	 * INT 1Ch below.  The system device deliberately resets with its mode
-	 * latch high, which selects the uPD4993A extension and inserts an extra
-	 * four bits ahead of the calendar stream.  DOS rarely notices, but
-	 * GRUB/98 polls the returned seconds while timing disk retries and will
-	 * wait forever if the fields remain nibble-shifted.
+	 * Match the uPD4993A mode left by the NEC PC-9821 POST.  Windows NT's
+	 * HAL accesses the calendar hardware directly after boot and assumes
+	 * this extended format.  INT 1Ch discards its four-bit prefix below so
+	 * callers still receive the documented six-byte BIOS representation.
 	 */
-	xorb	%al, %al
+	movb	$0xef, %al
 	outb	%al, $CALENDAR_MODE
 	/*
 	 * The ITF's destructive memory probe leaves unowned low-memory bytes
@@ -3006,6 +3004,15 @@ int1c_read_calendar:
 	outb	%al, $CALENDAR_CMD
 	movb	$0x03, %al		/* TIMEREAD command */
 	outb	%al, $CALENDAR_CMD
+
+	/* uPD4993A mode prefixes the ordinary 48-bit stream with four bits. */
+	movw	$4, %cx
+1:
+	movb	$0x13, %al		/* TIMEREAD | CLK */
+	outb	%al, $CALENDAR_CMD
+	movb	$0x03, %al
+	outb	%al, $CALENDAR_CMD
+	loop	1b
 
 	movw	$6, %cx
 2:
