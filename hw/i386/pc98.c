@@ -109,7 +109,6 @@ struct Pc98MachineClass {
 
     bool has_pci;   /* instantiate the PCI host bridge */
     bool has_wab;   /* instantiate the legacy NEC-LSI/Cirrus WAB */
-    bool has_pegc;  /* expose the built-in PEGC 256-colour mode (unused) */
     bool has_coregraph; /* PCI Core-Graph with a non-PnP Cirrus child */
 };
 
@@ -391,7 +390,7 @@ static void pc98_devices_init(Pc98MachineState *pms)
 
     /* display (vsync IRQ2); must precede pc98_mem_init */
     pms->vga = pc98_vga_init(get_system_io(), x86ms->gsi[2],
-                             pmc->has_pegc, &vga_regions);
+                             &vga_regions);
 
     /*
      * memory controller: ROM banks, RAM windows, mirrors.  hd_connect
@@ -400,7 +399,7 @@ static void pc98_devices_init(Pc98MachineState *pms)
     pms->mem = pc98_mem_init(get_system_memory(), get_system_io(),
                              machine->ram, machine->ram_size, &vga_regions,
                              pms->ide ? pc98_ide_connected(pms->ide) : 0,
-                             pmc->has_pci, pmc->has_pegc,
+                             pmc->has_pci,
                              pc98_vga_select_ems, pms->vga);
 
     /*
@@ -548,15 +547,13 @@ static void pc98_class_init(ObjectClass *oc, const void *data)
 
     pmc->has_pci = false;
     pmc->has_wab = true;
-    pmc->has_pegc = false;
     pmc->has_coregraph = false;
 
 }
 
 /*
  * pc9801: the pre-PC-9821 configuration.  It retains the base GDC/GRCG/EGC
- * display but has neither the PC-9821 PEGC packed-pixel extension nor the
- * local-bus Window Accelerator Board.
+ * display but has no local-bus Window Accelerator Board.
  */
 static void pc9801_class_init(ObjectClass *oc, const void *data)
 {
@@ -566,7 +563,6 @@ static void pc9801_class_init(ObjectClass *oc, const void *data)
     mc->desc = "NEC PC-9801";
     pmc->has_pci = false;
     pmc->has_wab = false;
-    pmc->has_pegc = false;
     pmc->has_coregraph = false;
 
     compat_props_add(mc->compat_props, pc98_compat_props,
@@ -585,12 +581,6 @@ static void pc9821_class_init(ObjectClass *oc, const void *data)
     mc->desc = "NEC PC-9821";
     pmc->has_pci = true;
     pmc->has_wab = false;
-    /*
-     * Core-Graph is the supported PC-9821 graphics path.  Do not expose
-     * PEGC, whose linear aperture requires reserving the 15-16 MiB system
-     * space and costs the guest one MiB of usable RAM.
-     */
-    pmc->has_pegc = false;
     pmc->has_coregraph = true;
 
     compat_props_add(mc->compat_props, pc98_compat_props,

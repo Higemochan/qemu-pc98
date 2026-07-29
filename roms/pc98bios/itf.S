@@ -199,10 +199,10 @@ cold_start:
 	call	pic_init
 
 	/*
-	 * PEGC is not exposed by the supported machine configuration, so the
-	 * 15-16 MiB system-space mirror serves no device.  Disable the hole
-	 * before sizing memory and keep this hardware state in lockstep with
-	 * the BIOS work-area value written by workarea_init.
+	 * The supported machine configuration has no device in the 15-16 MiB
+	 * system-space aperture.  Disable the hole before sizing memory and keep
+	 * this hardware state in lockstep with the BIOS work-area value written
+	 * by workarea_init.
 	 */
 	movb	$SYS16M_DISABLE, %al
 	movw	$SYS16M_CTRL, %dx

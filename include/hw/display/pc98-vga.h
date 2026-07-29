@@ -23,7 +23,6 @@ typedef struct VGAState Pc98VgaState;
  * board (pc98-mem) to map.
  */
 Pc98VgaState *pc98_vga_init(MemoryRegion *system_io, qemu_irq irq,
-                            bool has_pegc,
                             Pc98VgaRegions *regions);
 
 /* Let a board-level monitor relay reuse and render the GDC console. */

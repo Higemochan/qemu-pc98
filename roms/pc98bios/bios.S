@@ -1811,7 +1811,7 @@ int18_graph_area:
 	outb	%al, $GDC_GRAPH_CMD
 	movb	$0x05, %al
 	outb	%al, $GDC_GRAPH_CMD
-	movb	$0x0e, %al		/* restore the leading SYNC mode byte */
+	movb	$0x0f, %al		/* restore timing and enable display */
 	outb	%al, $GDC_GRAPH_CMD
 	movb	$0x02, %al
 	outb	%al, $GDC_GRAPH_PARAM

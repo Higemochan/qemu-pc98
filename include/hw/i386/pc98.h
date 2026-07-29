@@ -22,7 +22,6 @@ typedef struct Pc98VgaRegions {
     MemoryRegion *vram_a8000;  /* planar VRAM,      0x08000 bytes (0xa8000) */
     MemoryRegion *vram_b0000;  /* planar VRAM,      0x10000 bytes (0xb0000) */
     MemoryRegion *vram_e0000;  /* planar VRAM,      0x08000 bytes (0xe0000) */
-    MemoryRegion *vram_f00000; /* PEGC linear VRAM, 0x80000 bytes (0xf00000) */
 } Pc98VgaRegions;
 
 typedef struct Pc98MemState Pc98MemState;
@@ -65,7 +64,6 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
                             const Pc98VgaRegions *vga,
                             uint8_t hd_connect,
                             bool has_pci,
-                            bool has_pegc,
                             void (*ems_select)(void *opaque, uint32_t value),
                             void *ems_opaque);
 

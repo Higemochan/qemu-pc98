@@ -2,8 +2,8 @@ NEC PC-9801 and PC-9821 machines
 ================================
 
 The ``pc9801`` and ``pc9821`` machines model members of NEC's PC-98 family of
-Japanese personal computers.  They boot the machine's own ROM BIOS
-(ITF + BIOS) and run PC-98 operating systems and applications.
+Japanese personal, industry, or office computers.  They boot the machine's own
+ROM BIOS (ITF + BIOS) and run PC-98 operating systems and applications.
 
 The PC-98 is x86-based but is **not** a PC/AT compatible: the interrupt
 controller cascade, the timer clock, the I/O port map, the A20 behaviour, the
@@ -69,8 +69,9 @@ Supported devices
   (IRQ 10, DMA 3) interfaces; 1.2 MB (1024-byte sector) 2HD media.
 * Built-in IDE (IRQ 9): two channels multiplexed onto one register block,
   addressed with the PC-98 fixed 8-head / 17-sector BIOS geometry.
-* Display: uPD7220 (GDC) text and graphics with the GRCG, EGC and PEGC
-  blitters, and the 8/16-colour planar and 256-colour packed modes.
+* Display: uPD7220 (GDC) text and graphics with the GRCG and EGC blitters,
+  and the 8/16-colour planar modes.  Accelerated graphics use Cirrus through
+  Core-Graph on ``pc9821``.
 
 Disks
 -----
@@ -175,7 +176,12 @@ Sound
 
 Two sound devices are modelled:
 
-* The **PC-9801-86** FM sound board: a Yamaha YM2608 (OPNA) with an integrated
+* The built-in **Windows Sound System** (Mate-X PCM), a Crystal CS4231A codec
+  mapped at ``0x0F40``, shared with QEMU's ``cs4231a`` model.  Its power-on
+  route is IRQ 12 / DMA 1; the compatibility BIOS programs IRQ 3 / DMA 1
+  during POST.
+
+* The **PC-9801-86** sound board: a Yamaha YM2608 (OPNA) with an integrated
   YM2149-compatible SSG, reachable through I/O ports ``0x188``-``0x18E``, with
   the FM timer interrupt on PC-98 IRQ 3.  Software detects it through the sound
   ID register at ``0xA460`` (the board reports ``0x40``).  The 8 KiB internal
@@ -184,11 +190,6 @@ Two sound devices are modelled:
   (``-L``).  Without it, FM and SSG still play and only the rhythm channel is
   silent.  The FM/ADPCM engine is imported from the MAME OPN core and the SSG
   from the emu2149 core.
-
-* The built-in **Windows Sound System** (Mate-X PCM), a Crystal CS4231A codec
-  mapped at ``0x0F40``, shared with QEMU's ``cs4231a`` model.  Its power-on
-  route is IRQ 12 / DMA 1; the compatibility BIOS programs IRQ 3 / DMA 1
-  during POST.
 
 Both are optional and are created with ``-device pc98-opna`` and
 ``-device pc98-wss`` respectively.  Audio is emitted through the usual QEMU
