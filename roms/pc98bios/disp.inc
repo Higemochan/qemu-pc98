@@ -2,7 +2,7 @@
  * Minimal PC-9821 BIOS / Display controller bring-up
  * Copyright (C) 2026 Awe Morris
  *
- * Replayed from the NEC Xa7C9W ITF in its original order: the GDCs
+ * Replayed from the NEC Xa7 ITF in its original order: the GDCs
  * take command/parameter streams through the same ports, so only
  * the sequence is meaningful.
  *

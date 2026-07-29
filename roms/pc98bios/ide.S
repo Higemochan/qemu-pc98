@@ -72,7 +72,7 @@
 	/*
 	 * The main BIOS indexes this table in three-byte slots.  Keep even the
 	 * declined entries and the nonstandard signature byte-for-byte
-	 * compatible with the NEC Xa7C9W ROM.
+	 * compatible with the NEC Xa7 ROM.
 	 */
 	.globl	_start
 _start:

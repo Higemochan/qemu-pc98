@@ -50,6 +50,7 @@
 
 #define TVRAM_SIZE      0x4000
 #define VRAM16_SIZE     0x40000
+#define PEGC_POST_SIZE  0x80000
 
 #define GDC_BUFFERS     1024
 #define GDC_TABLEMAX    0x1000
@@ -160,11 +161,13 @@ struct EGCState {
 
 struct VGAState {
     QemuConsole *con;
+    bool pegc_post_compat;
 
     MemoryRegion tvram_mr;
     MemoryRegion vram_a8000_mr;
     MemoryRegion vram_b0000_mr;
     MemoryRegion vram_e0000_mr;
+    MemoryRegion pegc_post_mr;
     PortioList portio_list;
 
     uint8_t tvram_buffer[400 * 641];
@@ -180,10 +183,12 @@ struct VGAState {
     uint32_t palette_chr[8];
     uint32_t palette_gfx8[8];
     uint32_t palette_gfx16[16];
+    uint32_t palette_gfx256[256];
 
     uint8_t font[0x84000];
     uint8_t tvram[TVRAM_SIZE];
     uint8_t vram16[VRAM16_SIZE];
+    uint8_t pegc_post[PEGC_POST_SIZE];
     uint8_t *vram16_disp_b;
     uint8_t *vram16_disp_r;
     uint8_t *vram16_disp_g;
@@ -218,11 +223,13 @@ struct VGAState {
     uint8_t mode_select;
 
     uint8_t digipal[4];
-    uint8_t anapal[3][16];
+    uint8_t anapal[3][256];
     uint8_t anapal_select;
 
     uint8_t bank_draw;
     uint8_t bank_disp;
+    uint16_t pegc_bank_0;
+    uint16_t pegc_bank_1;
 
     uint16_t font_code;
     uint8_t font_line;
@@ -249,6 +256,7 @@ enum {
     MODE2_16COLOR       = 0x00,
     MODE2_EGC           = 0x02,
     MODE2_WRITE_MASK    = 0x03,
+    MODE2_256COLOR      = 0x10,
     MODE2_TXTSHIFT      = 0x20,
 };
 
@@ -3151,6 +3159,17 @@ static void mode_flipflop2_write(void *opaque, uint32_t addr, uint32_t value1)
         }
         break;
     case 0x10:
+        /*
+         * The Xa7 ROM unconditionally enables PEGC mode while testing the
+         * linear VRAM aperture and keeps using it to display the POST.
+         */
+        if (s->pegc_post_compat && s->mode2[MODE2_WRITE_MASK]) {
+            if (s->mode2[num] != value) {
+                s->mode2[num] = value;
+                s->dirty |= DIRTY_PALETTE | DIRTY_VRAM0 | DIRTY_VRAM1;
+            }
+        }
+        break;
     case 0x34:
         /* Unsupported extended display modes. */
         break;
@@ -3472,7 +3491,9 @@ static void palette_a8_write(void *opaque, uint32_t addr, uint32_t value)
     /* ioport 0xa8 */
     VGAState *s = opaque;
 
-    if (s->mode2[MODE2_16COLOR]) {
+    if (s->mode2[MODE2_256COLOR]) {
+        s->anapal_select = value;
+    } else if (s->mode2[MODE2_16COLOR]) {
         s->anapal_select = value & 0x0f;
     } else {
         if (s->digipal[0] != value) {
@@ -3487,7 +3508,8 @@ static uint32_t palette_a8_read(void *opaque, uint32_t addr)
     /* ioport 0xa8 */
     VGAState *s = opaque;
 
-    if (s->mode2[MODE2_16COLOR]) {
+    if (s->mode2[MODE2_256COLOR] ||
+        s->mode2[MODE2_16COLOR]) {
         return s->anapal_select;
     } else {
         return s->digipal[0];
@@ -3499,7 +3521,12 @@ static void palette_aa_write(void *opaque, uint32_t addr, uint32_t value)
     /* ioport 0xaa */
     VGAState *s = opaque;
 
-    if (s->mode2[MODE2_16COLOR]) {
+    if (s->mode2[MODE2_256COLOR]) {
+        if (s->anapal[PALETTE_G][s->anapal_select] != value) {
+            s->anapal[PALETTE_G][s->anapal_select] = value;
+            s->dirty |= DIRTY_PALETTE;
+        }
+    } else if (s->mode2[MODE2_16COLOR]) {
         if (s->anapal[PALETTE_G][s->anapal_select & 0x0f] != (value & 0x0f)) {
             s->anapal[PALETTE_G][s->anapal_select & 0x0f] = value & 0x0f;
             s->dirty |= DIRTY_PALETTE;
@@ -3517,7 +3544,9 @@ static uint32_t palette_aa_read(void *opaque, uint32_t addr)
     /* ioport 0xaa */
     VGAState *s = opaque;
 
-    if (s->mode2[MODE2_16COLOR]) {
+    if (s->mode2[MODE2_256COLOR]) {
+        return s->anapal[PALETTE_G][s->anapal_select];
+    } else if (s->mode2[MODE2_16COLOR]) {
         return s->anapal[PALETTE_G][s->anapal_select & 0x0f];
     } else {
         return s->digipal[1];
@@ -3529,7 +3558,12 @@ static void palette_ac_write(void *opaque, uint32_t addr, uint32_t value)
     /* ioport 0xac */
     VGAState *s = opaque;
 
-    if (s->mode2[MODE2_16COLOR]) {
+    if (s->mode2[MODE2_256COLOR]) {
+        if (s->anapal[PALETTE_R][s->anapal_select] != value) {
+            s->anapal[PALETTE_R][s->anapal_select] = value;
+            s->dirty |= DIRTY_PALETTE;
+        }
+    } else if (s->mode2[MODE2_16COLOR]) {
         if (s->anapal[PALETTE_R][s->anapal_select & 0x0f] != (value & 0x0f)) {
             s->anapal[PALETTE_R][s->anapal_select & 0x0f] = value & 0x0f;
             s->dirty |= DIRTY_PALETTE;
@@ -3547,7 +3581,9 @@ static uint32_t palette_ac_read(void *opaque, uint32_t addr)
     /* ioport 0xac */
     VGAState *s = opaque;
 
-    if (s->mode2[MODE2_16COLOR]) {
+    if (s->mode2[MODE2_256COLOR]) {
+        return s->anapal[PALETTE_R][s->anapal_select];
+    } else if (s->mode2[MODE2_16COLOR]) {
         return s->anapal[PALETTE_R][s->anapal_select & 0x0f];
     } else {
         return s->digipal[2];
@@ -3559,7 +3595,12 @@ static void palette_ae_write(void *opaque, uint32_t addr, uint32_t value)
     /* ioport 0xae */
     VGAState *s = opaque;
 
-    if (s->mode2[MODE2_16COLOR]) {
+    if (s->mode2[MODE2_256COLOR]) {
+        if (s->anapal[PALETTE_B][s->anapal_select] != value) {
+            s->anapal[PALETTE_B][s->anapal_select] = value;
+            s->dirty |= DIRTY_PALETTE;
+        }
+    } else if (s->mode2[MODE2_16COLOR]) {
         if (s->anapal[PALETTE_B][s->anapal_select & 0x0f] != (value & 0x0f)) {
             s->anapal[PALETTE_B][s->anapal_select & 0x0f] = value & 0x0f;
             s->dirty |= DIRTY_PALETTE;
@@ -3577,7 +3618,9 @@ static uint32_t palette_ae_read(void *opaque, uint32_t addr)
     /* ioport 0xae */
     VGAState *s = opaque;
 
-    if (s->mode2[MODE2_16COLOR]) {
+    if (s->mode2[MODE2_256COLOR]) {
+        return s->anapal[PALETTE_B][s->anapal_select];
+    } else if (s->mode2[MODE2_16COLOR]) {
         return s->anapal[PALETTE_B][s->anapal_select & 0x0f];
     } else {
         return s->digipal[3];
@@ -3699,7 +3742,11 @@ static uint32_t vram_readb(void *opaque, hwaddr addr)
 {
     VGAState *s = opaque;
 
-    if (s->grcg_mode & GRCG_CG_MODE) {
+    if (s->mode2[MODE2_256COLOR]) {
+        uint16_t bank = addr < 0x8000 ? s->pegc_bank_0 : s->pegc_bank_1;
+
+        return s->pegc_post[(bank & 0x0f) * 0x8000 + (addr & 0x7fff)];
+    } else if (s->grcg_mode & GRCG_CG_MODE) {
         if (s->mode2[MODE2_EGC]) {
             return egc_mem_readb(&s->egc, addr);
         } else {
@@ -3714,7 +3761,12 @@ static uint32_t vram_readw(void *opaque, hwaddr addr)
 {
     VGAState *s = opaque;
 
-    if (s->grcg_mode & GRCG_CG_MODE) {
+    if (s->mode2[MODE2_256COLOR]) {
+        uint16_t bank = addr < 0x8000 ? s->pegc_bank_0 : s->pegc_bank_1;
+
+        return lduw_le_p(s->pegc_post +
+                         (bank & 0x0f) * 0x8000 + (addr & 0x7fff));
+    } else if (s->grcg_mode & GRCG_CG_MODE) {
         if (s->mode2[MODE2_EGC]) {
             return egc_mem_readw(&s->egc, addr);
         } else {
@@ -3730,7 +3782,12 @@ static uint32_t vram_readl(void *opaque, hwaddr addr)
     VGAState *s = opaque;
     uint32_t value;
 
-    if (s->grcg_mode & GRCG_CG_MODE) {
+    if (s->mode2[MODE2_256COLOR]) {
+        uint16_t bank = addr < 0x8000 ? s->pegc_bank_0 : s->pegc_bank_1;
+
+        return ldl_le_p(s->pegc_post +
+                        (bank & 0x0f) * 0x8000 + (addr & 0x7fff));
+    } else if (s->grcg_mode & GRCG_CG_MODE) {
         if (s->mode2[MODE2_EGC]) {
             value = egc_mem_readw(&s->egc, addr);
             value |= egc_mem_readw(&s->egc, addr + 2) << 16;
@@ -3749,7 +3806,12 @@ static void vram_writeb(void *opaque, hwaddr addr, uint32_t value)
 {
     VGAState *s = opaque;
 
-    if (s->grcg_mode & GRCG_CG_MODE) {
+    if (s->mode2[MODE2_256COLOR]) {
+        uint16_t bank = addr < 0x8000 ? s->pegc_bank_0 : s->pegc_bank_1;
+
+        s->pegc_post[(bank & 0x0f) * 0x8000 + (addr & 0x7fff)] = value;
+        s->dirty |= (bank & 0x08) ? DIRTY_VRAM1 : DIRTY_VRAM0;
+    } else if (s->grcg_mode & GRCG_CG_MODE) {
         if (s->mode2[MODE2_EGC]) {
             egc_mem_writeb(&s->egc, addr, value);
         } else {
@@ -3766,7 +3828,13 @@ static void vram_writew(void *opaque, hwaddr addr, uint32_t value)
 {
     VGAState *s = opaque;
 
-    if (s->grcg_mode & GRCG_CG_MODE) {
+    if (s->mode2[MODE2_256COLOR]) {
+        uint16_t bank = addr < 0x8000 ? s->pegc_bank_0 : s->pegc_bank_1;
+
+        stw_le_p(s->pegc_post +
+                 (bank & 0x0f) * 0x8000 + (addr & 0x7fff), value);
+        s->dirty |= (bank & 0x08) ? DIRTY_VRAM1 : DIRTY_VRAM0;
+    } else if (s->grcg_mode & GRCG_CG_MODE) {
         if (s->mode2[MODE2_EGC]) {
             egc_mem_writew(&s->egc, addr, value);
         } else {
@@ -3783,7 +3851,13 @@ static void vram_writel(void *opaque, hwaddr addr, uint32_t value)
 {
     VGAState *s = opaque;
 
-    if (s->grcg_mode & GRCG_CG_MODE) {
+    if (s->mode2[MODE2_256COLOR]) {
+        uint16_t bank = addr < 0x8000 ? s->pegc_bank_0 : s->pegc_bank_1;
+
+        stl_le_p(s->pegc_post +
+                 (bank & 0x0f) * 0x8000 + (addr & 0x7fff), value);
+        s->dirty |= (bank & 0x08) ? DIRTY_VRAM1 : DIRTY_VRAM0;
+    } else if (s->grcg_mode & GRCG_CG_MODE) {
         if (s->mode2[MODE2_EGC]) {
             egc_mem_writew(&s->egc, addr, value & 0xffff);
             egc_mem_writew(&s->egc, addr + 2, value >> 16);
@@ -3828,36 +3902,161 @@ static void vram_b0000_writel(void *opaque, hwaddr addr, uint32_t value)
     vram_writel(opaque, addr + 0x8000, value);
 }
 
-/* 0xe0000 window: plane I of the 16-colour planar VRAM. */
+/*
+ * 0xe0000 window: plane I of planar VRAM, or the two packed-pixel bank
+ * selectors needed by the Xa7 POST while 256-colour mode is selected.
+ */
 
 static uint32_t vram_e0000_readb(void *opaque, hwaddr addr)
 {
+    VGAState *s = opaque;
+
+    if (s->mode2[MODE2_256COLOR]) {
+        switch (addr & 0x7fff) {
+        case 0x0004:
+            return s->pegc_bank_0 & 0xff;
+        case 0x0005:
+            return s->pegc_bank_0 >> 8;
+        case 0x0006:
+            return s->pegc_bank_1 & 0xff;
+        case 0x0007:
+            return s->pegc_bank_1 >> 8;
+        case 0x0100:
+            return 0; /* packed-pixel mode only */
+        default:
+            return 0xff;
+        }
+    }
     return vram_readb(opaque, addr + 0x18000);
 }
 
 static uint32_t vram_e0000_readw(void *opaque, hwaddr addr)
 {
+    VGAState *s = opaque;
+
+    if (s->mode2[MODE2_256COLOR]) {
+        switch (addr & 0x7fff) {
+        case 0x0004:
+            return s->pegc_bank_0;
+        case 0x0006:
+            return s->pegc_bank_1;
+        case 0x0100:
+            return 0; /* packed-pixel mode only */
+        default:
+            return 0xffff;
+        }
+    }
     return vram_readw(opaque, addr + 0x18000);
 }
 
 static uint32_t vram_e0000_readl(void *opaque, hwaddr addr)
 {
+    VGAState *s = opaque;
+
+    if (s->mode2[MODE2_256COLOR]) {
+        return vram_e0000_readw(opaque, addr) |
+               (vram_e0000_readw(opaque, addr + 2) << 16);
+    }
     return vram_readl(opaque, addr + 0x18000);
 }
 
 static void vram_e0000_writeb(void *opaque, hwaddr addr, uint32_t value)
 {
+    VGAState *s = opaque;
+
+    if (s->mode2[MODE2_256COLOR]) {
+        switch (addr & 0x7fff) {
+        case 0x0004:
+            s->pegc_bank_0 = value;
+            break;
+        case 0x0006:
+            s->pegc_bank_1 = value;
+            break;
+        }
+        return;
+    }
     vram_writeb(opaque, addr + 0x18000, value);
 }
 
 static void vram_e0000_writew(void *opaque, hwaddr addr, uint32_t value)
 {
+    VGAState *s = opaque;
+
+    if (s->mode2[MODE2_256COLOR]) {
+        vram_e0000_writeb(opaque, addr, value);
+        return;
+    }
     vram_writew(opaque, addr + 0x18000, value);
 }
 
 static void vram_e0000_writel(void *opaque, hwaddr addr, uint32_t value)
 {
+    VGAState *s = opaque;
+
+    if (s->mode2[MODE2_256COLOR]) {
+        vram_e0000_writew(opaque, addr, value);
+        vram_e0000_writew(opaque, addr + 2, value >> 16);
+        return;
+    }
     vram_writel(opaque, addr + 0x18000, value);
+}
+
+/*
+ * Minimal 0xf00000 PEGC aperture retained for the stock Xa7 ROM's POST.
+ * pc98-mem exposes this region only while the 16 MiB system space is active,
+ * so disabling that space gives the whole 15--16 MiB range back to RAM.
+ */
+static uint32_t pegc_post_readb(void *opaque, hwaddr addr)
+{
+    VGAState *s = opaque;
+
+    return s->mode2[MODE2_256COLOR] ? s->pegc_post[addr] : 0xff;
+}
+
+static uint32_t pegc_post_readw(void *opaque, hwaddr addr)
+{
+    VGAState *s = opaque;
+
+    return s->mode2[MODE2_256COLOR] ?
+           lduw_le_p(s->pegc_post + addr) : 0xffff;
+}
+
+static uint32_t pegc_post_readl(void *opaque, hwaddr addr)
+{
+    VGAState *s = opaque;
+
+    return s->mode2[MODE2_256COLOR] ?
+           ldl_le_p(s->pegc_post + addr) : 0xffffffff;
+}
+
+static void pegc_post_writeb(void *opaque, hwaddr addr, uint32_t value)
+{
+    VGAState *s = opaque;
+
+    if (s->mode2[MODE2_256COLOR]) {
+        s->pegc_post[addr] = value;
+        s->dirty |= (addr & 0x40000) ? DIRTY_VRAM1 : DIRTY_VRAM0;
+    }
+}
+
+static void pegc_post_writew(void *opaque, hwaddr addr, uint32_t value)
+{
+    VGAState *s = opaque;
+
+    if (s->mode2[MODE2_256COLOR]) {
+        stw_le_p(s->pegc_post + addr, value);
+        s->dirty |= (addr & 0x40000) ? DIRTY_VRAM1 : DIRTY_VRAM0;
+    }
+}
+
+static void pegc_post_writel(void *opaque, hwaddr addr, uint32_t value)
+{
+    VGAState *s = opaque;
+
+    if (s->mode2[MODE2_256COLOR]) {
+        stl_le_p(s->pegc_post + addr, value);
+        s->dirty |= (addr & 0x40000) ? DIRTY_VRAM1 : DIRTY_VRAM0;
+    }
 }
 
 /* gdc */
@@ -3929,7 +4128,14 @@ static void update_palette(VGAState *s)
         b = (i & 1) ? 0xff : 0;
         s->palette_chr[i] = rgb_to_pixel(depth, r, g, b);
     }
-    if (s->mode2[MODE2_16COLOR]) {
+    if (s->mode2[MODE2_256COLOR]) {
+        for (i = 0; i < 256; i++) {
+            r = s->anapal[PALETTE_R][i];
+            g = s->anapal[PALETTE_G][i];
+            b = s->anapal[PALETTE_B][i];
+            s->palette_gfx256[i] = rgb_to_pixel(depth, r, g, b);
+        }
+    } else if (s->mode2[MODE2_16COLOR]) {
         for (i = 0; i < 16; i++) {
             r = s->anapal[PALETTE_R][i] << 4;
             g = s->anapal[PALETTE_G][i] << 4;
@@ -4122,8 +4328,23 @@ static void render_gfx_screen(VGAState *s)
     uint8_t *dest;
     int x, y;
     uint8_t b, r, g, e = 0;
-    uint32_t *addr = gdc_get_address(&s->gdc_gfx, 1, 0x7fff);
+    uint32_t *addr;
 
+    if (s->mode2[MODE2_256COLOR]) {
+        const uint8_t *src = s->pegc_post +
+                             (s->bank_disp == DIRTY_VRAM1 ? 0x40000 : 0);
+
+        dest = s->bank_disp == DIRTY_VRAM1 ?
+               s->vram1_buffer : s->vram0_buffer;
+        for (y = 0; y < 400; y++) {
+            memcpy(dest, src, 640);
+            dest += 640;
+            src += 640;
+        }
+        return;
+    }
+
+    addr = gdc_get_address(&s->gdc_gfx, 1, 0x7fff);
     if (s->bank_disp == DIRTY_VRAM0) {
         dest = s->vram0_buffer;
     } else {
@@ -4258,7 +4479,9 @@ static bool update_display(void *opaque)
             } else {
                 src_gfx = s->vram1_buffer;
             }
-            if (s->mode2[MODE2_16COLOR]) {
+            if (s->mode2[MODE2_256COLOR]) {
+                palette_gfx = s->palette_gfx256;
+            } else if (s->mode2[MODE2_16COLOR]) {
                 palette_gfx = s->palette_gfx16;
             } else {
                 palette_gfx = s->palette_gfx8;
@@ -4456,6 +4679,8 @@ static void pc98_vga_reset(void *opaque)
 
     s->bank_disp = DIRTY_VRAM0;
     s->bank_draw = DIRTY_VRAM0;
+    s->pegc_bank_0 = 0;
+    s->pegc_bank_1 = 0;
 
     s->vram16_disp_b = s->vram16 + 0x00000;
     s->vram16_disp_r = s->vram16 + 0x08000;
@@ -4646,6 +4871,7 @@ static const VMStateDescription vmstate_pc98_vga = {
         VMSTATE_UINT8_ARRAY(font, VGAState, 0x84000),
         VMSTATE_UINT8_ARRAY(tvram, VGAState, TVRAM_SIZE),
         VMSTATE_UINT8_ARRAY(vram16, VGAState, VRAM16_SIZE),
+        VMSTATE_UINT8_ARRAY(pegc_post, VGAState, PEGC_POST_SIZE),
         VMSTATE_STRUCT(gdc_chr, VGAState, 0, vmstate_pc98_gdc, GDCState),
         VMSTATE_STRUCT(gdc_gfx, VGAState, 0, vmstate_pc98_gdc, GDCState),
         VMSTATE_STRUCT(egc, VGAState, 0, vmstate_pc98_egc, EGCState),
@@ -4667,10 +4893,12 @@ static const VMStateDescription vmstate_pc98_vga = {
         VMSTATE_UINT8_ARRAY(mode3, VGAState, 128),
         VMSTATE_UINT8(mode_select, VGAState),
         VMSTATE_UINT8_ARRAY(digipal, VGAState, 4),
-        VMSTATE_UINT8_2DARRAY(anapal, VGAState, 3, 16),
+        VMSTATE_UINT8_2DARRAY(anapal, VGAState, 3, 256),
         VMSTATE_UINT8(anapal_select, VGAState),
         VMSTATE_UINT8(bank_draw, VGAState),
         VMSTATE_UINT8(bank_disp, VGAState),
+        VMSTATE_UINT16(pegc_bank_0, VGAState),
+        VMSTATE_UINT16(pegc_bank_1, VGAState),
         VMSTATE_UINT16(font_code, VGAState),
         VMSTATE_UINT8(font_line, VGAState),
         VMSTATE_UINT8(blink, VGAState),
@@ -4821,6 +5049,7 @@ PC98_VGA_MMIO_OPS(tvram);
 PC98_VGA_MMIO_OPS(vram);          /* 0xa8000 window */
 PC98_VGA_MMIO_OPS(vram_b0000);
 PC98_VGA_MMIO_OPS(vram_e0000);
+PC98_VGA_MMIO_OPS(pegc_post);
 
 static const uint8_t memsw_default[] = {
     0xe1, 0x48, 0xe1, 0x05, 0xe1, 0x0c, 0xe1, 0x00,
@@ -4828,12 +5057,14 @@ static const uint8_t memsw_default[] = {
 };
 
 Pc98VgaState *pc98_vga_init(MemoryRegion *system_io, qemu_irq irq,
+                            bool pegc_post_compat,
                             Pc98VgaRegions *regions)
 {
     VGAState *s;
     int i;
 
     s = g_malloc0(sizeof(VGAState));
+    s->pegc_post_compat = pegc_post_compat;
 
     /* font */
     font_init(s);
@@ -4863,11 +5094,14 @@ Pc98VgaState *pc98_vga_init(MemoryRegion *system_io, qemu_irq irq,
                           "pc98-vram-b0000", 0x10000);
     memory_region_init_io(&s->vram_e0000_mr, NULL, &vram_e0000_mmio_ops, s,
                           "pc98-vram-e0000", 0x8000);
+    memory_region_init_io(&s->pegc_post_mr, NULL, &pegc_post_mmio_ops, s,
+                          "pc98-pegc-post", PEGC_POST_SIZE);
 
     regions->tvram = &s->tvram_mr;
     regions->vram_a8000 = &s->vram_a8000_mr;
     regions->vram_b0000 = &s->vram_b0000_mr;
     regions->vram_e0000 = &s->vram_e0000_mr;
+    regions->pegc_post = &s->pegc_post_mr;
 
     s->irq = irq;
 

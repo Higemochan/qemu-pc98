@@ -47,6 +47,7 @@
  *   |   +-- pc98.f8000-ram           alias ram[..]                prio 3
  *   +-- pc98.ram-mid @ 0x100000      alias ram[1M..15M)
  *   +-- pc98.ram-f00000 @ 0xf00000   alias ram[15M..16M)  (16MB space off)
+ *   +-- pc98.pegc-post @ 0xf00000     Xa7 POST backing      (16MB space on)
  *   +-- pc98.sys16m-mirror @ 0xfa0000 alias lowmem[0xa0000..1M)
  *   |                                 (16MB space on)
  *   +-- pc98.ram-high @ 0x1000000    alias ram[16M..) (if ram > 16M)
@@ -149,6 +150,7 @@ struct Pc98MemState {
 
     MemoryRegion ram_mid;
     MemoryRegion ram_f00000;
+    MemoryRegion *pegc_post;
     MemoryRegion sys16m_mirror;
     MemoryRegion ram_high;
     MemoryRegion top_mirror;
@@ -167,6 +169,7 @@ struct Pc98MemState {
     uint8_t ide_rom_present;  /* pc98ide.bin was found */
     uint8_t hd_mask;          /* attached IDE disks, bit per drive */
     bool has_pci;             /* PCI machine: 0xc0000 window shadowed as RAM */
+    bool pegc_post_compat;     /* NEC Xa7 ROM packed-pixel POST path */
     uint8_t d000_shadow;      /* PCI reg 0x64: D000 shadow-RAM enable bits */
     uint8_t bios_probe_write; /* PCI config 0x69 bit 4 */
     uint8_t f8e90_reset;
@@ -346,6 +349,9 @@ static void mem_apply_sys16m(Pc98MemState *s)
     memory_region_transaction_begin();
     memory_region_set_enabled(&s->sys16m_mirror, s->sys16m);
     memory_region_set_enabled(&s->ram_f00000, !s->sys16m);
+    if (s->pegc_post_compat) {
+        memory_region_set_enabled(s->pegc_post, s->sys16m);
+    }
 
     memory_region_transaction_commit();
 }
@@ -1034,6 +1040,7 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
                             const Pc98VgaRegions *vga,
                             uint8_t hd_connect,
                             bool has_pci,
+                            bool pegc_post_compat,
                             void (*ems_select)(void *opaque, uint32_t value),
                             void *ems_opaque)
 {
@@ -1044,6 +1051,7 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
     s->ram_size = ram_size;
     s->hd_mask = hd_connect;
     s->has_pci = has_pci;
+    s->pegc_post_compat = pegc_post_compat;
     s->cbus_option_roms = g_ptr_array_new();
     s->cbus_rom_gate = !has_pci;
     s->sys16m = 1;
@@ -1217,6 +1225,19 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
                              ram, 0xf00000, 0x100000);
     memory_region_add_subregion(system_memory, 0xf00000, &s->ram_f00000);
     memory_region_set_enabled(&s->ram_f00000, false);
+
+    /*
+     * NEC Xa7 firmware tests and displays its POST through the PEGC linear
+     * aperture without first branching on a presence result.  This backing
+     * store is mutually exclusive with the 15--16 MiB RAM alias through
+     * mem_apply_sys16m().
+     */
+    s->pegc_post = vga->pegc_post;
+    if (s->pegc_post_compat) {
+        memory_region_add_subregion_overlap(system_memory, 0xf00000,
+                                            s->pegc_post, 1);
+        memory_region_set_enabled(s->pegc_post, s->sys16m);
+    }
 
     /*
      * 16MB system space mirror of the low-1MiB layout (0xfa0000..0xffffff

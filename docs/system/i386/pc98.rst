@@ -2,8 +2,8 @@ NEC PC-9801 and PC-9821 machines
 ================================
 
 The ``pc9801`` and ``pc9821`` machines model members of NEC's PC-98 family of
-Japanese personal, industry, or office computers.  They boot the machine's own
-ROM BIOS (ITF + BIOS) and run PC-98 operating systems and applications.
+Japanese personal computers.  They boot the machine's own ROM BIOS
+(ITF + BIOS) and run PC-98 operating systems and applications.
 
 The PC-98 is x86-based but is **not** a PC/AT compatible: the interrupt
 controller cascade, the timer clock, the I/O port map, the A20 behaviour, the
@@ -22,7 +22,9 @@ Machine variants
 ``pc9821``
   Models a PCI-equipped PC-9821.  It instantiates the PC-98 PCI host bridge
   and the on-board Core-Graph bridge.  The Cirrus graphics function below
-  Core-Graph is not exposed as a separate PCI function.
+  Core-Graph is not exposed as a separate PCI function.  A limited
+  640x400 packed-pixel PEGC path is retained because the stock Xa7 ROM uses
+  it for both its video-memory test and POST display.
 
 This distinction is a machine contract: selecting ``pc9801`` must never
 silently add PCI or Core-Graph.  Both variants can use the same free
@@ -70,8 +72,15 @@ Supported devices
 * Built-in IDE (IRQ 9): two channels multiplexed onto one register block,
   addressed with the PC-98 fixed 8-head / 17-sector BIOS geometry.
 * Display: uPD7220 (GDC) text and graphics with the GRCG and EGC blitters,
-  and the 8/16-colour planar modes.  Accelerated graphics use Cirrus through
-  Core-Graph on ``pc9821``.
+  and the 8/16-colour planar modes.  ``pc9821`` additionally implements the
+  PEGC subset required by the stock Xa7 ROM: 640x400 packed-pixel VRAM,
+  two bank selectors and the 256-colour palette.  PEGC 640x480 and other
+  extended functions are not implemented.  Accelerated graphics use Cirrus
+  through Core-Graph.
+
+The PEGC POST aperture occupies ``0xf00000`` through ``0xf7ffff`` only while
+the 16 MiB system space is enabled.  When firmware disables that space, the
+PEGC mapping is removed and the full 15--16 MiB range is ordinary RAM.
 
 Disks
 -----
@@ -176,12 +185,7 @@ Sound
 
 Two sound devices are modelled:
 
-* The built-in **Windows Sound System** (Mate-X PCM), a Crystal CS4231A codec
-  mapped at ``0x0F40``, shared with QEMU's ``cs4231a`` model.  Its power-on
-  route is IRQ 12 / DMA 1; the compatibility BIOS programs IRQ 3 / DMA 1
-  during POST.
-
-* The **PC-9801-86** sound board: a Yamaha YM2608 (OPNA) with an integrated
+* The **PC-9801-86** FM sound board: a Yamaha YM2608 (OPNA) with an integrated
   YM2149-compatible SSG, reachable through I/O ports ``0x188``-``0x18E``, with
   the FM timer interrupt on PC-98 IRQ 3.  Software detects it through the sound
   ID register at ``0xA460`` (the board reports ``0x40``).  The 8 KiB internal
@@ -190,6 +194,11 @@ Two sound devices are modelled:
   (``-L``).  Without it, FM and SSG still play and only the rhythm channel is
   silent.  The FM/ADPCM engine is imported from the MAME OPN core and the SSG
   from the emu2149 core.
+
+* The built-in **Windows Sound System** (Mate-X PCM), a Crystal CS4231A codec
+  mapped at ``0x0F40``, shared with QEMU's ``cs4231a`` model.  Its power-on
+  route is IRQ 12 / DMA 1; the compatibility BIOS programs IRQ 3 / DMA 1
+  during POST.
 
 Both are optional and are created with ``-device pc98-opna`` and
 ``-device pc98-wss`` respectively.  Audio is emitted through the usual QEMU

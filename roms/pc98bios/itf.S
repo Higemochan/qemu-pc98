@@ -528,7 +528,7 @@ pic_init:
  * In particular it polls the C-bus bridge's register 0x64 and never leaves
  * that loop unless the value below is already in place, which is why a
  * machine whose ITF skipped this stalls with a blank screen right after the
- * PCI enumeration.  The values are the ones the Xa7C9W firmware writes, in
+ * PCI enumeration.  The values are the ones the Xa7 firmware writes, in
  * its order -- several registers are written more than once on purpose, so
  * this is a replayed sequence rather than a set of final values.
  *
