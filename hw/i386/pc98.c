@@ -483,13 +483,18 @@ static void pc98_machine_state_init(MachineState *machine)
     Pc98MachineState *pms = PC98_MACHINE(machine);
     X86MachineState *x86ms = X86_MACHINE(machine);
 
-    if (machine->ram_size < 16 * MiB) {
-        error_report("pc98 machine requires at least 16 MiB of RAM");
+    if (machine->ram_size < 2 * MiB) {
+        error_report("pc98 machine requires at least 2 MiB of RAM");
         exit(1);
     }
-    if (machine->ram_size & (8 * MiB - 1)) {
+    /*
+     * The BIOS work area reports memory below 16 MiB in 128 KiB units.
+     * Requiring 8 MiB multiples excluded the non-power-of-two memory
+     * configurations common on 386-era PC-98 systems.
+     */
+    if (machine->ram_size & (128 * KiB - 1)) {
         error_report("pc98 machine requires the RAM size to be a multiple "
-                     "of 8 MiB");
+                     "of 128 KiB");
         exit(1);
     }
 

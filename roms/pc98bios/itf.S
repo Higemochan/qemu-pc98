@@ -330,9 +330,11 @@ cold_start:
 workarea_init:
 	/*
 	 * Port 43Bh has disabled the unused 15-16 MiB system window, making
-	 * the full 15 MiB between 1 MiB and 16 MiB available as RAM.
+	 * the full range implemented below 16 MiB available as RAM.  The
+	 * memory controller updates WA_MEMSIZE when SYS16M_CTRL is written;
+	 * preserve that hardware-derived value.  Hard-coding 78h here made
+	 * configurations with less than 16 MiB advertise nonexistent RAM.
 	 */
-	movb	$0x78, WA_MEMSIZE
 	/* system clock, 5 MHz series */
 	movb	$0x24, WA_CLOCK
 	/* the emulated keyboard speaks the PC-9801-119 extended command set */

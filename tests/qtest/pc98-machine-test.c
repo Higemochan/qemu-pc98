@@ -41,6 +41,9 @@
 #define PC98_BASIC_BANK_SEL   0xe4
 #define PC98_BASIC_MAGIC_OFF  0x0040
 
+#define PC98_SYS16M_CTRL      0x043b
+#define PC98_BIOS_MEMSIZE     0x0401
+
 #define PC98_PCM_CLOCK_PORT   0xa466
 #define PC98_PCM_FIFO_PORT    0xa468
 #define PC98_PCM_DACTRL_PORT  0xa46a
@@ -108,6 +111,33 @@ static void test_pc9821_has_pci_coregraph(void)
 
     g_assert_nonnull(strstr(qtree, "dev: pc98-pcihost"));
     g_assert_nonnull(strstr(qtree, "dev: pc98-coregraph"));
+}
+
+static void test_pc9801_low_memory_workarea(void)
+{
+    QTestState *qts;
+
+    /*
+     * 5 MiB of physical address space represents the common 640 KiB
+     * conventional plus 4 MiB extended configuration once the PC-98
+     * 0xa0000-0xfffff hole is excluded.
+     */
+    qts = qtest_init(
+        "-machine pc9801 -m 5M -nodefaults -display none");
+    qtest_outb(qts, PC98_SYS16M_CTRL, 0x04);
+    g_assert_cmphex(qtest_readb(qts, PC98_BIOS_MEMSIZE), ==, 0x20);
+    qtest_outb(qts, PC98_SYS16M_CTRL, 0x00);
+    g_assert_cmphex(qtest_readb(qts, PC98_BIOS_MEMSIZE), ==, 0x20);
+    qtest_quit(qts);
+
+    /* The 15-16 MiB system window exists only at the full 16 MiB size. */
+    qts = qtest_init(
+        "-machine pc9801 -m 16M -nodefaults -display none");
+    qtest_outb(qts, PC98_SYS16M_CTRL, 0x04);
+    g_assert_cmphex(qtest_readb(qts, PC98_BIOS_MEMSIZE), ==, 0x78);
+    qtest_outb(qts, PC98_SYS16M_CTRL, 0x00);
+    g_assert_cmphex(qtest_readb(qts, PC98_BIOS_MEMSIZE), ==, 0x70);
+    qtest_quit(qts);
 }
 
 static uint32_t pc98_pci_config_address(uint8_t devfn, uint8_t reg)
@@ -515,6 +545,8 @@ int main(int argc, char **argv)
                    test_pc9801_has_no_pci);
     qtest_add_func("/pc98/pc9821/pci-coregraph",
                    test_pc9821_has_pci_coregraph);
+    qtest_add_func("/pc98/pc9801/low-memory-workarea",
+                   test_pc9801_low_memory_workarea);
     qtest_add_func("/pc98/pc9821/usb-pci-io-mmio-irq",
                    test_pc9821_usb_pci_io_mmio_irq);
     qtest_add_func("/pc98/lgy98/port-map",

@@ -62,6 +62,7 @@
 #include "qemu/datadir.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
+#include "qemu/units.h"
 #include "qapi/error.h"
 #include "hw/i386/pc98.h"
 #include "hw/core/loader.h"
@@ -166,6 +167,7 @@ struct Pc98MemState {
     uint32_t top_bank_ram_src; /* RAM alias source selected with top_bank */
     uint8_t bios_ram_gate;    /* 0x53d bit 1: writable BIOS RAM copy */
     uint8_t sys16m;           /* 0x43b: 16 MiB system space enabled */
+    bool has_ram_f00000;
     uint8_t ide_rom_present;  /* pc98ide.bin was found */
     uint8_t hd_mask;          /* attached IDE disks, bit per drive */
     bool has_pci;             /* PCI machine: 0xc0000 window shadowed as RAM */
@@ -348,7 +350,9 @@ static void mem_apply_sys16m(Pc98MemState *s)
 {
     memory_region_transaction_begin();
     memory_region_set_enabled(&s->sys16m_mirror, s->sys16m);
-    memory_region_set_enabled(&s->ram_f00000, !s->sys16m);
+    if (s->has_ram_f00000) {
+        memory_region_set_enabled(&s->ram_f00000, !s->sys16m);
+    }
     if (s->pegc_post_compat) {
         memory_region_set_enabled(s->pegc_post, s->sys16m);
     }
@@ -359,9 +363,14 @@ static void mem_apply_sys16m(Pc98MemState *s)
 static void mem_sync_sys16m_workarea(Pc98MemState *s)
 {
     uint8_t *ram = memory_region_get_ram_ptr(s->ram);
+    uint64_t low16_size;
 
     /* 1-16 MiB extended RAM, in 128 KiB units. */
-    ram[0x401] = s->sys16m ? 0x70 : 0x78;
+    low16_size = MIN(s->ram_size, 16 * MiB);
+    ram[0x401] = (low16_size - 1 * MiB) / (128 * KiB);
+    if (s->sys16m && low16_size == 16 * MiB) {
+        ram[0x401] -= 8; /* the 15-16 MiB system-space hole */
+    }
 }
 
 /*
@@ -470,7 +479,8 @@ static void mem_patch_bios_workarea(Pc98MemState *s)
 
     mem_sync_sys16m_workarea(s);
     ram = memory_region_get_ram_ptr(s->ram);
-    ext_mb = (s->ram_size - 0x1000000) >> 20;
+    ext_mb = s->ram_size > 16 * MiB ?
+             (s->ram_size - 16 * MiB) >> 20 : 0;
     ram[0x594] = ext_mb & 0xff;
     ram[0x595] = ext_mb >> 8;
     /* printer interface */
@@ -1215,16 +1225,22 @@ Pc98MemState *pc98_mem_init(MemoryRegion *system_memory,
     /* the CPU comes out of reset with A20 masked; match it */
     memory_region_set_enabled(&s->a20_wrap, true);
 
-    /* 1 MiB .. 15 MiB RAM */
+    /* 1 MiB .. the smaller of installed RAM and 15 MiB */
     memory_region_init_alias(&s->ram_mid, NULL, "pc98.ram-mid",
-                             ram, 0x100000, 0xf00000 - 0x100000);
+                             ram, 0x100000,
+                             MIN(ram_size, 15 * MiB) - 1 * MiB);
     memory_region_add_subregion(system_memory, 0x100000, &s->ram_mid);
 
     /* 15 MiB .. 16 MiB: RAM when the 16MB system space is disabled */
-    memory_region_init_alias(&s->ram_f00000, NULL, "pc98.ram-f00000",
-                             ram, 0xf00000, 0x100000);
-    memory_region_add_subregion(system_memory, 0xf00000, &s->ram_f00000);
-    memory_region_set_enabled(&s->ram_f00000, false);
+    if (ram_size > 15 * MiB) {
+        memory_region_init_alias(&s->ram_f00000, NULL, "pc98.ram-f00000",
+                                 ram, 0xf00000,
+                                 MIN(ram_size - 15 * MiB, 1 * MiB));
+        memory_region_add_subregion(system_memory, 0xf00000,
+                                    &s->ram_f00000);
+        memory_region_set_enabled(&s->ram_f00000, false);
+        s->has_ram_f00000 = true;
+    }
 
     /*
      * NEC Xa7 firmware tests and displays its POST through the PEGC linear
