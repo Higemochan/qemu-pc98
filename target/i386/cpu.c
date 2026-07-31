@@ -3754,6 +3754,23 @@ static const X86CPUDefinition builtin_x86_defs[] = {
         .model_id = "Genuine Intel(R) CPU           T2600  @ 2.16GHz",
     },
     {
+        /*
+         * Intel 80386DX baseline used by the PC-98 Linux port.
+         *
+         * The processor predates CPUID, so the feature words are empty.
+         * TCG instruction decoding also has to enforce the 386/486
+         * boundary; the family number alone is not sufficient.
+         */
+        .name = "386",
+        .level = 0,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 3,
+        .model = 0,
+        .stepping = 8,
+        .xlevel = 0,
+        .model_id = "",
+    },
+    {
         .name = "486",
         .level = 1,
         .vendor = CPUID_VENDOR_INTEL,

@@ -102,6 +102,14 @@ typedef enum X86OpSize {
 
 typedef enum X86CPUIDFeature {
     X86_FEAT_None,
+    /*
+     * These are architectural generation checks rather than CPUID bits.
+     * They keep pre-CPUID CPUs from accepting later 0F opcodes merely
+     * because those instructions do not have a feature bit of their own.
+     */
+    X86_FEAT_I486,
+    X86_FEAT_I586,
+    X86_FEAT_I686,
     X86_FEAT_3DNOW,
     X86_FEAT_ADX,
     X86_FEAT_AES,
