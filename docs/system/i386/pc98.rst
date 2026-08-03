@@ -163,9 +163,31 @@ media are accepted; the earlier project-local ``if=scsi98`` spelling and
    qemu-system-i386 -M pc9821 -L <romdir> \
        -drive if=scsi,format=raw,file=scsidisk.raw
 
-The controller device's internal QOM name is ``pc98-scsi``.  Its functional
-completion and SCSI BIOS work are deferred, so this interface is currently
-intended for development and smoke testing.
+The controller device's internal QOM name is ``pc98-scsi``.  The emulated
+WD33C93 data path supports programmed I/O and PC-98 DMA channel 0 for both
+READ and WRITE commands.  Image-backed fixed disks and standard QEMU
+``media=cdrom`` drives are supported; HDD and CD-ROM regression tests cover
+PIO, DMA, target status, removable-media Unit Attention recovery and
+2048-byte CD-ROM READ(10).
+
+The free 8 KiB ``pc98scsi.bin`` option ROM implements fixed-disk SENSE,
+READ and WRITE through the PC-98 common INT 1Bh interface and can boot an
+``IPL1`` fixed disk from SCSI targets 0 through 6.  It probes only
+non-removable direct-access devices as BIOS hard disks; CD-ROMs remain
+available to native SCSI drivers.  The BIOS translation is 16 heads and 63
+sectors per track, so a bootable image must carry a PC-98 partition table
+made for that geometry.  An image installed using the IDE BIOS's 8/17
+geometry is not necessarily SCSI bootable.
+
+The compatible ROM is an independent implementation and contains no code
+from NEC's copyrighted ``SCSIBIOS.ROM``.  The original ROM can still be
+selected for compatibility testing with
+``-global pc98-scsi.romfile=SCSIBIOS.ROM`` and an appropriate ``-L`` path.
+
+``-global pc98-scsi.bios-boot=off`` replaces only the option ROM's direct
+boot entry while retaining its common BIOS services.  A firmware disk menu
+that discovers the same device through those services may still list it;
+the option does not hide the SCSI target from firmware or the guest OS.
 
 Serial and network
 ------------------
@@ -214,4 +236,5 @@ Not implemented:
 - EMS
 - SMP
 - complete compatibility-BIOS services
-- complete PC-9801-92 SCSI and SCSI BIOS behavior
+- synchronous SCSI negotiation and the less common PC-9801-92 BIOS controls
+- BIOS fixed-disk services for removable SCSI media and CD-ROM boot

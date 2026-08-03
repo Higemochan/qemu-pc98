@@ -24,6 +24,33 @@
 #define ATA_CMD_WRITE 0x30
 #define ATA_CMD_IDENTIFY 0xec
 
+#define PC98_SCSI_ASR       0x0cc0
+#define PC98_SCSI_INDIRECT  0x0cc2
+#define PC98_SCSI_DMA       0x0cc4
+#define PC98_SCSI_DATA      0x0cc6
+
+#define PC98_SCSI_TARGET_LUN 0x0f
+#define PC98_SCSI_COUNT      0x12
+#define PC98_SCSI_DEST_ID    0x15
+#define PC98_SCSI_STATUS     0x17
+#define PC98_SCSI_COMMAND    0x18
+
+#define PC98_SCSI_ASR_INT    0x80
+#define PC98_SCSI_ASR_DBR    0x01
+#define PC98_SCSI_RESET_DONE 0x01
+#define PC98_SCSI_XFER_DONE  0x16
+#define PC98_SCSI_RESET      0x00
+#define PC98_SCSI_SELECT_XFER 0x09
+#define PC98_SCSI_ROM_BASE    0x0d2000
+
+#define PC98_DMA0_ADDR       0x01
+#define PC98_DMA0_COUNT      0x03
+#define PC98_DMA0_MASK       0x15
+#define PC98_DMA_MODE        0x17
+#define PC98_DMA_CLEAR_FF    0x19
+#define PC98_DMA_RESET       0x1b
+#define PC98_DMA0_PAGE       0x27
+
 #define LGY98_IOBASE       0x00d0
 #define LGY98_ISR          (LGY98_IOBASE + 7)
 #define LGY98_RESET        0x03d0
@@ -408,6 +435,258 @@ static void pc98_ide_identify(QTestState *qts, uint8_t *buf)
     pc98_ide_read_data(qts, buf);
 }
 
+static void pc98_scsi_reg_select(QTestState *qts, uint8_t reg)
+{
+    qtest_outb(qts, PC98_SCSI_ASR, reg);
+}
+
+static void pc98_scsi_reg_write(QTestState *qts, uint8_t reg, uint8_t value)
+{
+    pc98_scsi_reg_select(qts, reg);
+    qtest_outb(qts, PC98_SCSI_INDIRECT, value);
+}
+
+static uint8_t pc98_scsi_reg_read(QTestState *qts, uint8_t reg)
+{
+    pc98_scsi_reg_select(qts, reg);
+    return qtest_inb(qts, PC98_SCSI_INDIRECT);
+}
+
+static void pc98_scsi_reg_write_buf(QTestState *qts, uint8_t reg,
+                                    const uint8_t *buf, size_t len)
+{
+    size_t i;
+
+    pc98_scsi_reg_select(qts, reg);
+    for (i = 0; i < len; i++) {
+        qtest_outb(qts, PC98_SCSI_INDIRECT, buf[i]);
+    }
+}
+
+static void pc98_scsi_wait_asr(QTestState *qts, uint8_t mask,
+                               uint8_t expected)
+{
+    int i;
+
+    for (i = 0; i < 10000; i++) {
+        if ((qtest_inb(qts, PC98_SCSI_ASR) & mask) == expected) {
+            return;
+        }
+        qtest_clock_step(qts, 1000);
+    }
+    g_assert_not_reached();
+}
+
+static void pc98_scsi_setup_command(QTestState *qts, const uint8_t *cdb,
+                                    size_t cdb_len, uint32_t byte_count)
+{
+    uint8_t count[3] = {
+        byte_count >> 16,
+        byte_count >> 8,
+        byte_count,
+    };
+
+    pc98_scsi_reg_write(qts, PC98_SCSI_DEST_ID, 0);
+    pc98_scsi_reg_write(qts, PC98_SCSI_TARGET_LUN, 0);
+    pc98_scsi_reg_write_buf(qts, PC98_SCSI_COUNT, count, sizeof(count));
+    pc98_scsi_reg_write_buf(qts, 0x03, cdb, cdb_len);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND, PC98_SCSI_SELECT_XFER);
+}
+
+static void pc98_scsi_finish_command(QTestState *qts, uint8_t expected_status)
+{
+    uint8_t csr;
+    uint8_t status;
+
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_INT, PC98_SCSI_ASR_INT);
+    csr = pc98_scsi_reg_read(qts, PC98_SCSI_STATUS);
+    status = pc98_scsi_reg_read(qts, PC98_SCSI_TARGET_LUN);
+    g_assert_cmphex(csr, ==, PC98_SCSI_XFER_DONE);
+    g_assert_cmphex(status, ==, expected_status);
+}
+
+static void pc98_scsi_setup_dma0(QTestState *qts, uint16_t address,
+                                 uint16_t byte_count, uint8_t mode)
+{
+    uint16_t count = byte_count - 1;
+
+    qtest_outb(qts, PC98_DMA_RESET, 0);
+    qtest_outb(qts, PC98_DMA_CLEAR_FF, 0);
+    qtest_outb(qts, PC98_DMA0_ADDR, address);
+    qtest_outb(qts, PC98_DMA0_ADDR, address >> 8);
+    qtest_outb(qts, PC98_DMA0_COUNT, count);
+    qtest_outb(qts, PC98_DMA0_COUNT, count >> 8);
+    qtest_outb(qts, PC98_DMA0_PAGE, 0);
+    qtest_outb(qts, PC98_DMA_MODE, mode);
+    qtest_outb(qts, PC98_DMA0_MASK, 0);
+}
+
+static void test_pc98_scsi_pio_dma_rw(void)
+{
+    g_autoptr(GError) err = NULL;
+    g_autofree char *image = NULL;
+    QTestState *qts;
+    uint8_t write_cdb[10] = { 0x2a, 0, 0, 0, 0, 7, 0, 0, 1, 0 };
+    uint8_t read_cdb[10] = { 0x28, 0, 0, 0, 0, 7, 0, 0, 1, 0 };
+    uint8_t tur_cdb[6] = { 0 };
+    uint8_t expected[512];
+    uint8_t actual[512];
+    const uint32_t dma_address = 0x8000;
+    int fd;
+    int i;
+
+    fd = g_file_open_tmp("qemu-pc98-scsi-XXXXXX", &image, &err);
+    g_assert_no_error(err);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, 1024 * 1024), ==, 0);
+    close(fd);
+
+    qts = qtest_initf(
+        "-machine pc9801 -nodefaults -display none "
+        "-drive if=scsi,format=raw,file=%s",
+        image);
+
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND, PC98_SCSI_RESET);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmphex(pc98_scsi_reg_read(qts, PC98_SCSI_STATUS), ==,
+                    PC98_SCSI_RESET_DONE);
+
+    /* Image-backed targets become ready after the ROM's initial TUR. */
+    pc98_scsi_setup_command(qts, tur_cdb, sizeof(tur_cdb), 0);
+    pc98_scsi_finish_command(qts, 0);
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = i * 37 + 0x5a;
+    }
+    pc98_scsi_setup_command(qts, write_cdb, sizeof(write_cdb),
+                            sizeof(expected));
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 0; i < sizeof(expected); i++) {
+        qtest_outb(qts, PC98_SCSI_DATA, expected[i]);
+    }
+    pc98_scsi_finish_command(qts, 0);
+
+    pc98_scsi_setup_command(qts, read_cdb, sizeof(read_cdb),
+                            sizeof(actual));
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 0; i < sizeof(actual); i++) {
+        actual[i] = qtest_inb(qts, PC98_SCSI_DATA);
+    }
+    pc98_scsi_finish_command(qts, 0);
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+
+    write_cdb[5] = 8;
+    read_cdb[5] = 8;
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = i * 53 + 0xc3;
+    }
+    qtest_memwrite(qts, dma_address, expected, sizeof(expected));
+    pc98_scsi_setup_dma0(qts, dma_address, sizeof(expected), 0x08);
+    pc98_scsi_setup_command(qts, write_cdb, sizeof(write_cdb),
+                            sizeof(expected));
+    qtest_outb(qts, PC98_SCSI_DMA, 0x01);
+    pc98_scsi_finish_command(qts, 0);
+
+    memset(actual, 0, sizeof(actual));
+    qtest_memwrite(qts, dma_address, actual, sizeof(actual));
+    pc98_scsi_setup_dma0(qts, dma_address, sizeof(actual), 0x04);
+    pc98_scsi_setup_command(qts, read_cdb, sizeof(read_cdb), sizeof(actual));
+    qtest_outb(qts, PC98_SCSI_DMA, 0x01);
+    pc98_scsi_finish_command(qts, 0);
+    qtest_memread(qts, dma_address, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_remove(image), ==, 0);
+}
+
+static void test_pc98_scsi_free_bios_rom(void)
+{
+    static const uint8_t signature[] = { 0x55, 0xaa, 0x02 };
+    QTestState *qts;
+    uint8_t actual[sizeof(signature)];
+
+    qts = qtest_init(
+        "-machine pc9801 -nodefaults -display none "
+        "-drive if=scsi,format=raw,file=null-co://");
+    qtest_memread(qts, PC98_SCSI_ROM_BASE + 9, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), signature, sizeof(signature));
+    qtest_quit(qts);
+}
+
+static void test_pc98_scsi_cd_read(void)
+{
+    g_autoptr(GError) err = NULL;
+    g_autofree char *image = NULL;
+    QTestState *qts;
+    uint8_t inquiry_cdb[6] = { 0x12, 0, 0, 0, 36, 0 };
+    uint8_t capacity_cdb[10] = { 0x25 };
+    uint8_t sense_cdb[6] = { 0x03, 0, 0, 0, 18, 0 };
+    uint8_t read_cdb[10] = { 0x28, 0, 0, 0, 0, 16, 0, 0, 1, 0 };
+    uint8_t pvd[2048] = { 0x01, 'C', 'D', '0', '0', '1', 0x01 };
+    uint8_t buf[2048];
+    int fd;
+    int i;
+
+    fd = g_file_open_tmp("qemu-pc98-scsi-cd-XXXXXX", &image, &err);
+    g_assert_no_error(err);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, 64 * 2048), ==, 0);
+    g_assert_cmpint(pwrite(fd, pvd, sizeof(pvd), 16 * 2048), ==,
+                    sizeof(pvd));
+    close(fd);
+
+    qts = qtest_initf(
+        "-machine pc9801 -nodefaults -display none "
+        "-drive if=scsi,media=cdrom,readonly=on,format=raw,file=%s",
+        image);
+
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND, PC98_SCSI_RESET);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmphex(pc98_scsi_reg_read(qts, PC98_SCSI_STATUS), ==,
+                    PC98_SCSI_RESET_DONE);
+
+    pc98_scsi_setup_command(qts, inquiry_cdb, sizeof(inquiry_cdb), 36);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 0; i < 36; i++) {
+        buf[i] = qtest_inb(qts, PC98_SCSI_DATA);
+    }
+    pc98_scsi_finish_command(qts, 0);
+    g_assert_cmphex(buf[0] & 0x1f, ==, 0x05);
+    g_assert_cmphex(buf[1] & 0x80, ==, 0x80);
+
+    /* The first media command reports power-on Unit Attention. */
+    pc98_scsi_setup_command(qts, capacity_cdb, sizeof(capacity_cdb), 8);
+    pc98_scsi_finish_command(qts, 0x02);
+    pc98_scsi_setup_command(qts, sense_cdb, sizeof(sense_cdb), 18);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 0; i < 18; i++) {
+        buf[i] = qtest_inb(qts, PC98_SCSI_DATA);
+    }
+    pc98_scsi_finish_command(qts, 0);
+
+    pc98_scsi_setup_command(qts, capacity_cdb, sizeof(capacity_cdb), 8);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 0; i < 8; i++) {
+        buf[i] = qtest_inb(qts, PC98_SCSI_DATA);
+    }
+    pc98_scsi_finish_command(qts, 0);
+    g_assert_cmphex(buf[3], ==, 63);
+    g_assert_cmphex(buf[6], ==, 0x08);
+    g_assert_cmphex(buf[7], ==, 0x00);
+
+    pc98_scsi_setup_command(qts, read_cdb, sizeof(read_cdb), sizeof(buf));
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 0; i < sizeof(buf); i++) {
+        buf[i] = qtest_inb(qts, PC98_SCSI_DATA);
+    }
+    pc98_scsi_finish_command(qts, 0);
+    g_assert_cmpmem(buf, 7, pvd, 7);
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_remove(image), ==, 0);
+}
+
 static void test_pc98_vvfat_boot_layout(void)
 {
     g_autoptr(GError) err = NULL;
@@ -559,6 +838,12 @@ int main(int argc, char **argv)
                    test_pc98_opna_pcm_fifo_irq);
     qtest_add_func("/pc98/vvfat98/boot-layout",
                    test_pc98_vvfat_boot_layout);
+    qtest_add_func("/pc98/scsi/pio-dma-rw",
+                   test_pc98_scsi_pio_dma_rw);
+    qtest_add_func("/pc98/scsi/cd-read",
+                   test_pc98_scsi_cd_read);
+    qtest_add_func("/pc98/scsi/free-bios-rom",
+                   test_pc98_scsi_free_bios_rom);
 
     return g_test_run();
 }

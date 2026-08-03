@@ -68,6 +68,7 @@ blobs = [
   'pvh.bin',
   'pc98itf.bin',
   'pc98ide.bin',
+  'pc98scsi.bin',
   'pc98pci.bin',
   'pc98bios.bin',
   'pc98basic.bin',
