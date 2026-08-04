@@ -63,11 +63,15 @@
 	 * geometry there rather than consuming an undocumented main-BIOS work
 	 * area cell.  These offsets are relative to the D800 ROM segment.
 	 */
-	.equ	ROM_WORK_CYLINDERS,	0x3000
-	.equ	ROM_WORK_HEADS,		0x3002
-	.equ	ROM_WORK_SECTORS,	0x3004
-	.equ	ROM_WORK_SELECTED,	0x3006
-	.equ	ROM_WORK_TYPES,		0x3008	/* 0=none, 1=ATA HDD, 2=ATAPI */
+	.equ	ROM_WORK_CYLINDERS,	0x3000	/* four words, physical order */
+	.equ	ROM_WORK_HEADS,		0x3008	/* four words, physical order */
+	.equ	ROM_WORK_SECTORS,	0x3010	/* four words, physical order */
+	/* Selected physical slot and four device-type bytes. */
+	/* The final four bytes map logical HDD numbers to physical slots. */
+	/* Type values: 0=none, 1=ATA HDD, 2=ATAPI. */
+	.equ	ROM_WORK_SELECTED,	0x3018
+	.equ	ROM_WORK_TYPES,		0x3019
+	.equ	ROM_WORK_LOGICAL,	0x301d
 
 	/*
 	 * The main BIOS indexes this table in three-byte slots.  Keep even the
@@ -149,7 +153,7 @@ install_entry:
 	lret
 
 /*
- * Initialise the fixed machine profile and verify that ATA master answers.
+ * Initialise private state and probe all four physical ATA slots.
  * The ITF has already issued the reset required to run ATA diagnostics.
  * Do not pulse SRST again here: the minimal free main BIOS launches the IPL
  * immediately after this call, before a second reset could settle.
@@ -184,30 +188,28 @@ init_entry:
 	outb	%al, $WAIT_IO
 	sti
 
-	movw	$BIOS_CYLINDERS, %ax
-	movw	%ax, %cs:ROM_WORK_CYLINDERS
-	movw	$BIOS_HEADS, %ax
-	movw	%ax, %cs:ROM_WORK_HEADS
-	movw	$BIOS_SECTORS, %ax
-	movw	%ax, %cs:ROM_WORK_SECTORS
-
-	movw	$ROM_WORK_TYPES, %di
+	movw	$0xffff, %cs:ROM_WORK_LOGICAL
+	movw	$0xffff, %cs:ROM_WORK_LOGICAL+2
 	xorw	%si, %si
 2:
+	movw	%si, %bx
+	shlw	$1, %bx
+	movw	$BIOS_CYLINDERS, %cs:ROM_WORK_CYLINDERS(%bx)
+	movw	$BIOS_HEADS, %cs:ROM_WORK_HEADS(%bx)
+	movw	$BIOS_SECTORS, %cs:ROM_WORK_SECTORS(%bx)
 	movw	%si, %ax
 	movb	%al, %cs:ROM_WORK_SELECTED
 	call	ata_probe_device
-	movb	%al, %cs:(%di)
-	incw	%di
+	movb	%al, %cs:ROM_WORK_TYPES(%si)
+	cmpb	$1, %al
+	jne	3f
+	call	ata_identify_geometry
+3:
 	incw	%si
 	cmpw	$4, %si
 	jb	2b
 
 	movb	$0, %cs:ROM_WORK_SELECTED
-	cmpb	$1, %cs:ROM_WORK_TYPES
-	jne	3f
-	call	ata_identify_geometry
-3:
 	/*
 	 * 055Dh is the dense BIOS drive-number bitmap, while 05BAh records
 	 * the physical ATA slots.  A disk in physical slot 2 alone is thus
@@ -215,24 +217,33 @@ init_entry:
 	 */
 	xorw	%bx, %bx
 	xorw	%cx, %cx
+	xorw	%di, %di
 	cmpb	$1, %cs:ROM_WORK_TYPES+0
 	jne	4f
 	orb	$0x01, %bl
+	movb	$0, %cs:ROM_WORK_LOGICAL(%di)
+	incw	%di
 	incw	%cx
 4:
 	cmpb	$1, %cs:ROM_WORK_TYPES+1
 	jne	5f
 	orb	$0x02, %bl
+	movb	$1, %cs:ROM_WORK_LOGICAL(%di)
+	incw	%di
 	incw	%cx
 5:
 	cmpb	$1, %cs:ROM_WORK_TYPES+2
 	jne	6f
 	orb	$0x04, %bl
+	movb	$2, %cs:ROM_WORK_LOGICAL(%di)
+	incw	%di
 	incw	%cx
 6:
 	cmpb	$1, %cs:ROM_WORK_TYPES+3
 	jne	7f
 	orb	$0x08, %bl
+	movb	$3, %cs:ROM_WORK_LOGICAL(%di)
+	incw	%di
 	incw	%cx
 7:
 	movb	WA_IDE_PROBE, %al
@@ -253,8 +264,6 @@ init_entry:
 	orb	$0x10, WA_GEOMETRY	/* drive 0: variable 8/17 profile */
 	orb	$0x48, WA_IDE_FLAGS	/* fast IDE and fixed-disk boot */
 	orb	$0x80, WA_DISK_FLAGS
-	cmpb	$1, %cs:ROM_WORK_TYPES
-	jne	1f
 	movb	$0x80, WA_BOOT_DEVICE
 1:
 	popw	%di
@@ -316,6 +325,9 @@ boot_entry:
 	movw	$BOOT_SEGMENT, %ax
 	movw	%ax, %es
 	xorw	%di, %di
+	movb	$0, %cs:ROM_WORK_SELECTED
+	call	ata_map_logical_hdd
+	jc	boot_return
 	xorl	%eax, %eax
 	movw	$2, %cx
 	call	ata_pio_read
@@ -363,16 +375,39 @@ int1b_entry:
 	movb	%al, %cs:ROM_WORK_SELECTED
 
 	movb	1(%bp), %al
+	andb	$0x7f, %al
+	cmpb	$0x16, %al
+	je	int1b_atapi_request
 	andb	$0x0f, %al
+	cmpb	$0x04, %al
+	je	int1b_map_hdd
+	cmpb	$0x05, %al
+	je	int1b_map_hdd
+	cmpb	$0x06, %al
+	je	int1b_map_hdd
+
+	/* Recalibrate, initialise and unsupported legacy controls are no-ops. */
+	xorw	%ax, %ax
+	jmp	int1b_finish
+
+int1b_map_hdd:
+	call	ata_map_logical_hdd
+	jc	int1b_finish
 	cmpb	$0x04, %al
 	je	int1b_sense
 	cmpb	$0x05, %al
 	je	int1b_write
-	cmpb	$0x06, %al
-	je	int1b_read
+	jmp	int1b_read
 
-	/* Recalibrate, initialise and unsupported legacy controls are no-ops. */
-	xorw	%ax, %ax
+int1b_atapi_request:
+	xorw	%bx, %bx
+	movb	%cs:ROM_WORK_SELECTED, %bl
+	cmpb	$2, %cs:ROM_WORK_TYPES(%bx)
+	jne	int1b_bad_device
+	jmp	int1b_atapi_read
+
+int1b_bad_device:
+	movb	$0x60, %ah
 	jmp	int1b_finish
 
 int1b_sense:
@@ -387,10 +422,11 @@ int1b_sense:
 	jmp	int1b_finish
 1:
 	movw	$512, 2(%bp)
-	movw	%cs:ROM_WORK_CYLINDERS, %ax
+	shlw	$1, %bx
+	movw	%cs:ROM_WORK_CYLINDERS(%bx), %ax
 	movw	%ax, 4(%bp)
-	movb	%cs:ROM_WORK_HEADS, %ah
-	movb	%cs:ROM_WORK_SECTORS, %al
+	movb	%cs:ROM_WORK_HEADS(%bx), %ah
+	movb	%cs:ROM_WORK_SECTORS(%bx), %al
 	movw	%ax, 6(%bp)
 	movb	$0x0f, %ah
 	jmp	int1b_finish
@@ -460,9 +496,12 @@ request_lba:
 	testb	$0x80, 0(%bp)
 	jz	request_relative
 
+	xorw	%bx, %bx
+	movb	%cs:ROM_WORK_SELECTED, %bl
+	shlw	$1, %bx
+	movzwl	%cs:ROM_WORK_SECTORS(%bx), %ecx
+	movzwl	%cs:ROM_WORK_HEADS(%bx), %ebx
 	movzwl	4(%bp), %eax
-	movzwl	%cs:ROM_WORK_HEADS, %ebx
-	movzwl	%cs:ROM_WORK_SECTORS, %ecx
 	imull	%ecx, %ebx
 	imull	%ebx, %eax
 	movzbl	7(%bp), %edx
@@ -610,12 +649,10 @@ ata_probe_done:
 	ret
 
 /*
- * Read the current master's legacy geometry from ATA IDENTIFY words 1, 3
- * and 6.  QEMU's pc98 IDE controller reports the machine's required 8/17
- * translation here, with the cylinder count derived from the image size.
- * Consume all 256 words so the device leaves its data phase.  Invalid or
- * unavailable IDENTIFY data leaves the conservative defaults installed by
- * init_entry.
+ * Read the selected HDD's legacy geometry from ATA IDENTIFY words 1, 3 and
+ * 6, and retain it independently for that physical slot.  Consume all 256
+ * words so the device leaves its data phase.  Invalid or unavailable data
+ * leaves the conservative defaults installed by init_entry.
  */
 ata_identify_geometry:
 	pushw	%ax
@@ -623,6 +660,7 @@ ata_identify_geometry:
 	pushw	%cx
 	pushw	%dx
 	pushw	%si
+	pushw	%di
 
 	call	ata_select_channel
 	movw	$IDE_DRVHEAD, %dx
@@ -665,9 +703,14 @@ ata_identify_geometry:
 	jz	1f
 	cmpw	$0x00ff, %cx
 	ja	1f
-	movw	%bx, %cs:ROM_WORK_CYLINDERS
-	movw	%si, %cs:ROM_WORK_HEADS
-	movw	%cx, %cs:ROM_WORK_SECTORS
+	xorw	%di, %di
+	movb	%cs:ROM_WORK_SELECTED, %al
+	xorb	%ah, %ah
+	shlw	$1, %ax
+	movw	%ax, %di
+	movw	%bx, %cs:ROM_WORK_CYLINDERS(%di)
+	movw	%si, %cs:ROM_WORK_HEADS(%di)
+	movw	%cx, %cs:ROM_WORK_SECTORS(%di)
 1:
 	movw	$249, %cx		/* words 7 through 255 */
 3:
@@ -675,11 +718,32 @@ ata_identify_geometry:
 	loop	3b
 	clc
 2:
+	popw	%di
 	popw	%si
 	popw	%dx
 	popw	%cx
 	popw	%bx
 	popw	%ax
+	ret
+
+/* Convert the dense BIOS HDD number in SELECTED to a physical ATA slot. */
+ata_map_logical_hdd:
+	pushw	%bx
+	xorw	%bx, %bx
+	movb	%cs:ROM_WORK_SELECTED, %bl
+	cmpb	$4, %bl
+	jae	1f
+	movb	%cs:ROM_WORK_LOGICAL(%bx), %bl
+	cmpb	$0xff, %bl
+	je	1f
+	movb	%bl, %cs:ROM_WORK_SELECTED
+	popw	%bx
+	clc
+	ret
+1:
+	popw	%bx
+	movb	$0x60, %ah
+	stc
 	ret
 
 /*
@@ -721,9 +785,9 @@ ata_setup:
 	ret
 
 /*
- * Select the multiplexed ATA channel for the current BIOS unit.  Units
- * 80h/81h are channel 0 master/slave and 82h/83h are channel 1
- * master/slave.  The device bit itself is applied to DEV/HEAD by callers.
+ * Select the multiplexed ATA channel for the current physical slot.  Slots
+ * 0/1 are channel 0 master/slave and slots 2/3 are channel 1 master/slave.
+ * The device bit itself is applied to DEV/HEAD by callers.
  */
 ata_select_channel:
 	pushw	%ax
