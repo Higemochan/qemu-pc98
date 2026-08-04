@@ -46,8 +46,9 @@
 	.equ	MAIN_INT1B_OFF,		0x17c0
 	.equ	MAIN_BIOS_SEG,		0xfd80
 	.equ	BOOT_SEGMENT,		0x1fc0
-	.equ	SCSI_HEADS,		16
-	.equ	SCSI_SECTORS,		63
+	/* PC-9801-92 compatible BIOS logical geometry (8 GiB limit). */
+	.equ	SCSI_HEADS,		8
+	.equ	SCSI_SECTORS,		32
 
 	/*
 	 * PC-98 C-Bus disk ROM entry table.  The boot-control property patches
@@ -426,7 +427,7 @@ request_buffer_count:
 	movw	%dx, %es
 	ret
 
-/* Return READ CAPACITY converted to the BIOS 16/63 cylinder count in AX. */
+/* Return READ CAPACITY converted to the BIOS 8/32 cylinder count in AX. */
 scsi_capacity_cylinders:
 	pushw	%bx
 	pushw	%cx
@@ -502,6 +503,7 @@ scsi_read10:
 	pushw	%bx
 	pushw	%cx
 	pushw	%si
+	pushw	%bp
 	subw	$10, %sp
 	movw	%sp, %si
 	movb	$0x28, %ss:0(%si)
@@ -524,6 +526,8 @@ scsi_read10:
 	shlw	$9, %ax
 	movw	$10, %cx
 	call	scsi_exec_in
+	pushfw
+	popw	%bp
 	popw	%dx			/* discard CDB without changing FLAGS */
 	popw	%dx
 	popw	%dx
@@ -533,6 +537,15 @@ scsi_read10:
 	popw	%cx
 	popw	%bx
 	popl	%eax
+	testw	$1, %bp
+	popw	%bp
+	jnz	1f
+	xorb	%ah, %ah
+	clc
+	ret
+1:
+	movb	$0x80, %ah
+	stc
 	ret
 
 /* EAX=LBA, CX=blocks, BX=requested bytes, ES:DI=buffer. */
@@ -541,6 +554,7 @@ scsi_write10:
 	pushw	%bx
 	pushw	%cx
 	pushw	%si
+	pushw	%bp
 	subw	$10, %sp
 	movw	%sp, %si
 	movb	$0x2a, %ss:0(%si)
@@ -563,6 +577,8 @@ scsi_write10:
 	shlw	$9, %ax
 	movw	$10, %cx
 	call	scsi_exec_out
+	pushfw
+	popw	%bp
 	popw	%dx			/* discard CDB without changing FLAGS */
 	popw	%dx
 	popw	%dx
@@ -572,6 +588,15 @@ scsi_write10:
 	popw	%cx
 	popw	%bx
 	popl	%eax
+	testw	$1, %bp
+	popw	%bp
+	jnz	1f
+	xorb	%ah, %ah
+	clc
+	ret
+1:
+	movb	$0x80, %ah
+	stc
 	ret
 
 /* AX=wire byte count (zero means 64 KiB), BX=stored bytes, SS:SI CDB. */

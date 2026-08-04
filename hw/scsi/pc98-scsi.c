@@ -40,6 +40,9 @@
 #define PC98_SCSI_LEGACY_ROM   "SCSIBIOS.ROM"
 #define PC98_SCSI_IRQ_DELAY_NS  100000
 #define PC98_MODE_PAGE_FORMAT_DEVICE 0x03
+/* PC-9801-92 geometry; later PCI adapters may use 8 heads by 128 sectors. */
+#define PC98_SCSI_BIOS_HEADS     8
+#define PC98_SCSI_BIOS_SECTORS   32
 
 /* WD33C93 registers */
 enum {
@@ -341,7 +344,6 @@ static void pc98_scsi_patch_mode_sense_geometry(SCSIRequest *req,
     uint32_t block_size;
     uint32_t off;
     uint32_t page_len;
-    uint32_t sectors;
     bool found = false;
 
     if (req->cmd.buf[0] != MODE_SENSE ||
@@ -371,7 +373,6 @@ static void pc98_scsi_patch_mode_sense_geometry(SCSIRequest *req,
         return;
     }
 
-    sectors = req->dev->conf.secs ?: 63;
     block_size = req->dev->conf.logical_block_size ?: 512;
 
     /*
@@ -390,13 +391,15 @@ static void pc98_scsi_patch_mode_sense_geometry(SCSIRequest *req,
 
     buf[20] = PC98_MODE_PAGE_FORMAT_DEVICE;
     buf[21] = 0x16;
-    /* The common BIOS keeps its fixed-disk flag with the logical heads. */
-    buf[23] = 0x80 | MIN(req->dev->conf.heads ?: 16, 0x7f);
-    buf[30] = sectors >> 8;
-    buf[31] = sectors;
+    /* The common BIOS uses tracks-per-zone as its logical head count. */
+    buf[23] = PC98_SCSI_BIOS_HEADS;
+    buf[30] = PC98_SCSI_BIOS_SECTORS >> 8;
+    buf[31] = PC98_SCSI_BIOS_SECTORS;
     buf[32] = block_size >> 8;
     buf[33] = block_size;
     buf[35] = 1;
+    /* Mark a fixed disk as hard-sectored in the PC-98 BIOS work area. */
+    buf[40] = 0x40;
 
     buf[44] = MODE_PAGE_HD_GEOMETRY;
     buf[45] = 0x12;
