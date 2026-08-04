@@ -31,8 +31,11 @@
 	.equ	PIC2_DATA,	0x000a
 
 	.equ	ATA_SRST,	0x06
-	.equ	ATA_READ,	0xc4
-	.equ	ATA_WRITE,	0xc5
+	.equ	ATA_READ_SECTORS,	0x20
+	.equ	ATA_WRITE_SECTORS,	0x30
+	.equ	ATA_READ_MULTIPLE,	0xc4
+	.equ	ATA_WRITE_MULTIPLE,	0xc5
+	.equ	ATA_SET_MULTIPLE,	0xc6
 	.equ	ATA_PACKET,	0xa0
 	.equ	ATA_IDENTIFY,	0xec
 	.equ	ATA_ST_ERR,	0x01
@@ -72,6 +75,9 @@
 	.equ	ROM_WORK_SELECTED,	0x3018
 	.equ	ROM_WORK_TYPES,		0x3019
 	.equ	ROM_WORK_LOGICAL,	0x301d
+	/* Four IDENTIFY word-47 maxima and four successfully enabled counts. */
+	.equ	ROM_WORK_MULTI_MAX,	0x3021
+	.equ	ROM_WORK_MULTI_ACTIVE,	0x3025
 
 	/*
 	 * The main BIOS indexes this table in three-byte slots.  Keep even the
@@ -197,6 +203,8 @@ init_entry:
 	movw	$BIOS_CYLINDERS, %cs:ROM_WORK_CYLINDERS(%bx)
 	movw	$BIOS_HEADS, %cs:ROM_WORK_HEADS(%bx)
 	movw	$BIOS_SECTORS, %cs:ROM_WORK_SECTORS(%bx)
+	movb	$0, %cs:ROM_WORK_MULTI_MAX(%si)
+	movb	$0, %cs:ROM_WORK_MULTI_ACTIVE(%si)
 	movw	%si, %ax
 	movb	%al, %cs:ROM_WORK_SELECTED
 	call	ata_probe_device
@@ -204,6 +212,7 @@ init_entry:
 	cmpb	$1, %al
 	jne	3f
 	call	ata_identify_geometry
+	call	ata_enable_multiple
 3:
 	incw	%si
 	cmpw	$4, %si
@@ -650,9 +659,9 @@ ata_probe_done:
 
 /*
  * Read the selected HDD's legacy geometry from ATA IDENTIFY words 1, 3 and
- * 6, and retain it independently for that physical slot.  Consume all 256
- * words so the device leaves its data phase.  Invalid or unavailable data
- * leaves the conservative defaults installed by init_entry.
+ * 6, plus its maximum multiple-sector count from word 47.  Retain them for
+ * that physical slot and consume all 256 words.  Invalid or unavailable
+ * data leaves the conservative defaults installed by init_entry.
  */
 ata_identify_geometry:
 	pushw	%ax
@@ -712,10 +721,23 @@ ata_identify_geometry:
 	movw	%si, %cs:ROM_WORK_HEADS(%di)
 	movw	%cx, %cs:ROM_WORK_SECTORS(%di)
 1:
-	movw	$249, %cx		/* words 7 through 255 */
+	movw	$40, %cx		/* words 7 through 46 */
 3:
 	inw	%dx, %ax
 	loop	3b
+	inw	%dx, %ax		/* word 47: maximum multiple count */
+	testw	$0x8000, %ax
+	jz	4f
+	testb	%al, %al
+	jz	4f
+	xorw	%bx, %bx
+	movb	%cs:ROM_WORK_SELECTED, %bl
+	movb	%al, %cs:ROM_WORK_MULTI_MAX(%bx)
+4:
+	movw	$208, %cx		/* words 48 through 255 */
+5:
+	inw	%dx, %ax
+	loop	5b
 	clc
 2:
 	popw	%di
@@ -746,6 +768,81 @@ ata_map_logical_hdd:
 	stc
 	ret
 
+/* Enable the IDENTIFY-advertised multiple count for the selected HDD. */
+ata_enable_multiple:
+	pushw	%ax
+	pushw	%bx
+	pushw	%cx
+	pushw	%dx
+	pushw	%si
+
+	xorw	%bx, %bx
+	movb	%cs:ROM_WORK_SELECTED, %bl
+	movzbw	%cs:ROM_WORK_MULTI_MAX(%bx), %si
+	cmpw	$2, %si
+	jb	2f
+	cmpw	$128, %si
+	ja	2f
+	movw	%si, %ax
+	decw	%ax
+	testw	%si, %ax
+	jnz	2f
+
+	call	ata_select_channel
+	movw	$IDE_DRVHEAD, %dx
+	movb	$0xa0, %al
+	testb	$0x01, %cs:ROM_WORK_SELECTED
+	jz	1f
+	orb	$0x10, %al
+1:
+	outb	%al, %dx
+	call	ata_wait_idle
+	jc	2f
+
+	movw	$IDE_SECCNT, %dx
+	movw	%si, %ax
+	outb	%al, %dx
+	movw	$IDE_COMMAND, %dx
+	movb	$ATA_SET_MULTIPLE, %al
+	outb	%al, %dx
+	call	ata_wait_ready
+	jc	2f
+
+	movw	%si, %ax
+	movb	%al, %cs:ROM_WORK_MULTI_ACTIVE(%bx)
+2:
+	popw	%si
+	popw	%dx
+	popw	%cx
+	popw	%bx
+	popw	%ax
+	ret
+
+/* Return ZF clear only after SET MULTIPLE MODE succeeded for this HDD. */
+ata_multiple_active:
+	pushw	%bx
+	xorw	%bx, %bx
+	movb	%cs:ROM_WORK_SELECTED, %bl
+	cmpb	$0, %cs:ROM_WORK_MULTI_ACTIVE(%bx)
+	popw	%bx
+	ret
+
+ata_read_opcode:
+	movb	$ATA_READ_SECTORS, %al
+	call	ata_multiple_active
+	jz	1f
+	movb	$ATA_READ_MULTIPLE, %al
+1:
+	ret
+
+ata_write_opcode:
+	movb	$ATA_WRITE_SECTORS, %al
+	call	ata_multiple_active
+	jz	1f
+	movb	$ATA_WRITE_MULTIPLE, %al
+1:
+	ret
+
 /*
  * Program an LBA28 command.  Input is EAX=LBA and CX=sector count.
  * SI retains the count for the data loop.
@@ -755,7 +852,7 @@ ata_setup:
 	movl	%eax, %ebx
 
 	call	ata_select_channel
-	call	ata_wait_ready
+	call	ata_wait_idle
 	jc	1f
 
 	movw	%si, %ax
@@ -805,7 +902,7 @@ ata_pio_read:
 	call	ata_setup
 	jc	ata_failed
 	movw	$IDE_COMMAND, %dx
-	movb	$ATA_READ, %al
+	call	ata_read_opcode
 	outb	%al, %dx
 	cld
 1:
@@ -842,7 +939,7 @@ ata_pio_read_bytes:
 	call	ata_setup
 	jc	5f
 	movw	$IDE_COMMAND, %dx
-	movb	$ATA_READ, %al
+	call	ata_read_opcode
 	outb	%al, %dx
 	cld
 2:
@@ -994,7 +1091,7 @@ ata_pio_write:
 	movw	%si, %bx
 	movw	%di, %si
 	movw	$IDE_COMMAND, %dx
-	movb	$ATA_WRITE, %al
+	call	ata_write_opcode
 	outb	%al, %dx
 	cld
 1:
@@ -1008,6 +1105,24 @@ ata_pio_write:
 	call	ata_wait_ready
 	jc	ata_failed
 	xorw	%ax, %ax
+	clc
+	ret
+
+/* Wait until a new command can be issued, ignoring a stale ERR status. */
+ata_wait_idle:
+	movw	$0xffff, %cx
+	movw	$IDE_STATUS, %dx
+1:
+	inb	%dx, %al
+	testb	$ATA_ST_BSY, %al
+	jnz	2f
+	testb	$ATA_ST_DRDY, %al
+	jnz	3f
+2:
+	outb	%al, $WAIT_IO
+	loop	1b
+	jmp	ata_failed
+3:
 	clc
 	ret
 
