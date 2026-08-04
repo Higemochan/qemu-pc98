@@ -15,6 +15,7 @@
 .text
 
 	.equ	IDE_CHANNEL,	0x0432
+	.equ	IDE_IRQ_SOURCE,	0x0433
 	.equ	IDE_DATA,	0x0640
 	.equ	IDE_ERROR,	0x0642
 	.equ	IDE_SECCNT,	0x0644
@@ -287,7 +288,14 @@ init_entry:
 /*
  * IDE IRQ9 acknowledgement.
  *
- * Reading the command-block status register deasserts the ATA interrupt.
+ * Bits 0 and 1 of port 0433h identify primary and secondary channel IRQs.
+ * Select every reported channel and read its command-block status register,
+ * which deasserts that ATA interrupt, then restore the bank selected by the
+ * interrupted code.  If no source is reported, acknowledge the current bank
+ * as a compatibility fallback.  The final write to 0433h matches the Xa7
+ * BIOS sequence; QEMU accepts it as a no-op because the status reads have
+ * already removed the live IRQ sources.
+ *
  * A non-specific EOI is then sent to the slave and master PICs.  The stock
  * ROM conditionally omits the master EOI while another slave request is in
  * service; this compact handler has no other unmasked slave source during
@@ -297,10 +305,51 @@ init_entry:
 ide_irq:
 	pushw	%ax
 	pushw	%dx
+	pushw	%bx
 
+	movw	$IDE_CHANNEL, %dx
+	inb	%dx, %al
+	movb	%al, %bl
+	movw	$IDE_IRQ_SOURCE, %dx
+	inb	%dx, %al
+	andb	$0x03, %al
+	movb	%al, %bh
+	jnz	1f
+
+	/* If source bits are unavailable, clear the currently selected bank. */
 	movw	$IDE_STATUS, %dx
 	inb	%dx, %al
 	outb	%al, $WAIT_IO
+	jmp	4f
+
+1:
+	testb	$0x01, %bh
+	jz	2f
+	movb	%bl, %al
+	andb	$0xfe, %al
+	movw	$IDE_CHANNEL, %dx
+	outb	%al, %dx
+	movw	$IDE_STATUS, %dx
+	inb	%dx, %al
+	outb	%al, $WAIT_IO
+2:
+	testb	$0x02, %bh
+	jz	3f
+	movb	%bl, %al
+	orb	$0x01, %al
+	movw	$IDE_CHANNEL, %dx
+	outb	%al, %dx
+	movw	$IDE_STATUS, %dx
+	inb	%dx, %al
+	outb	%al, $WAIT_IO
+3:
+	movw	$IDE_CHANNEL, %dx
+	movb	%bl, %al
+	outb	%al, %dx
+4:
+	movw	$IDE_IRQ_SOURCE, %dx
+	movb	$0x01, %al
+	outb	%al, %dx
 
 	movb	$0x20, %al
 	outb	%al, $PIC2_CMD
@@ -308,6 +357,7 @@ ide_irq:
 	outb	%al, $PIC1_CMD
 	outb	%al, $WAIT_IO
 
+	popw	%bx
 	popw	%dx
 	popw	%ax
 	iret
