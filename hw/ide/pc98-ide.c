@@ -533,39 +533,6 @@ static void pc98_ide_register_types(void)
 
 type_init(pc98_ide_register_types)
 
-/*
- * Impose the PC-98 IDE logical geometry on a drive.  The PC-98 IDE BIOS
- * addresses the disk with a fixed "class 2" profile (see ram[0x457] in
- * pc98-mem.c): 8 heads, 17 sectors per track, and a cylinder count it
- * derives from the IDENTIFY capacity as total / (8 * 17).  Program the same
- * shape into the drive so IDENTIFY reports it and C/H/S reads land on the
- * LBAs the BIOS intends.  QEMU's generic geometry auto-guess must not be
- * used -- it picks a different layout and every partition access misses.
- * Disk images therefore must be partitioned for 8-head geometry (as the
- * real BIOS's own FORMAT would).
- */
-static void pc98_ide_set_geometry(IDEState *ide)
-{
-    int cyls;
-
-    /* ATAPI (CD-ROM) devices have no fixed C/H/S geometry; leave them alone. */
-    if (!ide->blk || ide->drive_kind != IDE_HD || ide->nb_sectors == 0) {
-        return;
-    }
-
-    cyls = ide->nb_sectors / (PC98_IDE_HEADS * PC98_IDE_SECTORS);
-    if (cyls < 1) {
-        cyls = 1;
-    } else if (cyls > 65535) {
-        cyls = 65535;
-    }
-
-    ide->cylinders = cyls;
-    ide->heads = ide->drive_heads = PC98_IDE_HEADS;
-    ide->sectors = ide->drive_sectors = PC98_IDE_SECTORS;
-    ide->identify_set = 0;   /* rebuild IDENTIFY data with the new geometry */
-}
-
 ISADevice *pc98_ide_init(ISABus *bus, DriveInfo **hd_table, qemu_irq irq)
 {
     DeviceState *dev;
@@ -587,12 +554,6 @@ ISADevice *pc98_ide_init(ISABus *bus, DriveInfo **hd_table, qemu_irq irq)
     }
     for (i = 0; i < PC98_IDE_NBUS; i++) {
         ide_bus_reset(&s->bus[i]);
-    }
-    /* Override geometry after reset so ide_reset() does not clobber it. */
-    for (i = 0; i < 4; i++) {
-        if (hd_table[i]) {
-            pc98_ide_set_geometry(&s->bus[i / 2].ifs[i % 2]);
-        }
     }
 
     return isadev;
