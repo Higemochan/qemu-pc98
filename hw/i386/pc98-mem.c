@@ -61,6 +61,7 @@
 #include "qemu/osdep.h"
 #include "qemu/datadir.h"
 #include "qemu/error-report.h"
+#include "qemu/host-utils.h"
 #include "qemu/log.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
@@ -475,6 +476,8 @@ void pc98_mem_set_a20_wrap(void *opaque, bool wrap)
 static void mem_patch_bios_workarea(Pc98MemState *s)
 {
     uint8_t *ram;
+    uint8_t physical_hd_mask;
+    uint8_t logical_hd_mask;
     uint16_t ext_mb;
 
     mem_sync_sys16m_workarea(s);
@@ -495,6 +498,18 @@ static void mem_patch_bios_workarea(Pc98MemState *s)
     ram[0x481] |= 0x40;
 
     /*
+     * 055Dh describes the dense BIOS drive-number space; 05BAh describes
+     * physical ATA slots.  Keep the probe latch in the physical form too.
+     * Overwrite rather than OR the low nibble because the ITF work-area
+     * seed contains a provisional drive-0 bit before probing hardware.
+     */
+    physical_hd_mask = s->hd_mask & 0x0f;
+    logical_hd_mask = (1U << ctpop8(physical_hd_mask)) - 1;
+    ram[0x55d] = (ram[0x55d] & 0xf0) | logical_hd_mask;
+    ram[0x5ba] = (ram[0x5ba] & 0xf0) | physical_hd_mask;
+    ram[0xf8e90] = (ram[0xf8e90] & 0xf0) | physical_hd_mask;
+
+    /*
      * ram[0x457] selects the IDE geometry *class* the IDE BIOS uses for INIT
      * DEVICE PARAMETERS and SENSE: drive-0 class is bits 3-5, drive-1 class
      * bits 0-2, and the SENSE geometry comes from a fixed table in the IDE
@@ -512,7 +527,6 @@ static void mem_patch_bios_workarea(Pc98MemState *s)
         if (s->hd_mask & 1) {
             ram[0x457] = 0x90;   /* drive0: class 2, variable 8-head */
             ram[0x45d] |= 0x08;  /* fast ide */
-            ram[0x55d] |= 0x01;  /* ide drive connected */
             ram[0x5b0] = 0x00;   /* ide drive size */
         } else {
             ram[0x457] = 0x38;   /* no drive0 */
@@ -521,7 +535,6 @@ static void mem_patch_bios_workarea(Pc98MemState *s)
         if (s->hd_mask & 2) {
             ram[0x457] |= 0x42;  /* drive1: class 2 */
             ram[0x45d] |= 0x10;
-            ram[0x55d] |= 0x02;
         } else {
             ram[0x457] |= 0x07;  /* no drive1 */
             ram[0x5b0] |= 0x07;
@@ -536,7 +549,6 @@ static void mem_patch_bios_workarea(Pc98MemState *s)
              */
             ram[0x45d] |= 0x40;
         }
-        ram[0xf8e90] |= (s->hd_mask & 0x0f);
     }
 }
 

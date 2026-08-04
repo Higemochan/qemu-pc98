@@ -208,27 +208,47 @@ init_entry:
 	jne	3f
 	call	ata_identify_geometry
 3:
+	/*
+	 * 055Dh is the dense BIOS drive-number bitmap, while 05BAh records
+	 * the physical ATA slots.  A disk in physical slot 2 alone is thus
+	 * BIOS drive 80h (055Dh bit 0), but remains 05BAh bit 2.
+	 */
 	xorw	%bx, %bx
+	xorw	%cx, %cx
 	cmpb	$1, %cs:ROM_WORK_TYPES+0
 	jne	4f
-	orw	$0x0001, %bx
+	orb	$0x01, %bl
+	incw	%cx
 4:
 	cmpb	$1, %cs:ROM_WORK_TYPES+1
 	jne	5f
-	orw	$0x0002, %bx
+	orb	$0x02, %bl
+	incw	%cx
 5:
 	cmpb	$1, %cs:ROM_WORK_TYPES+2
 	jne	6f
-	orw	$0x0004, %bx
+	orb	$0x04, %bl
+	incw	%cx
 6:
 	cmpb	$1, %cs:ROM_WORK_TYPES+3
 	jne	7f
-	orw	$0x0008, %bx
+	orb	$0x08, %bl
+	incw	%cx
 7:
-	orw	%bx, WA_DRIVES
+	movb	WA_IDE_PROBE, %al
+	andb	$0xf0, %al
+	orb	%bl, %al
+	movb	%al, WA_IDE_PROBE
+
+	movb	$1, %al
+	shlb	%cl, %al
+	decb	%al
+	movb	WA_DRIVES, %ah
+	andb	$0xf0, %ah
+	orb	%al, %ah
+	movb	%ah, WA_DRIVES
 	testw	%bx, %bx
 	jz	1f
-	orb	$0x01, WA_IDE_PROBE
 	andb	$0xc7, WA_GEOMETRY
 	orb	$0x10, WA_GEOMETRY	/* drive 0: variable 8/17 profile */
 	orb	$0x48, WA_IDE_FLAGS	/* fast IDE and fixed-disk boot */
