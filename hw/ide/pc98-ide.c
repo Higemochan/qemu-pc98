@@ -81,6 +81,11 @@ static void pc98_ide_trace(const char *tag, int reg, uint32_t val)
 #define PC98_IDE_NBUS 2
 #define PC98_IDE_HEADS 8
 #define PC98_IDE_SECTORS 17
+#define PC98_IDE_BANK_SECONDARY 0x01
+#define PC98_IDE_BANK_DWORD     0x08
+#define PC98_IDE_BANK_WRITABLE  0x39
+#define PC98_IDE_CONN_WRITABLE  0x71
+#define PC98_IDE_SLAVE_CAPABLE  0x40
 
 struct Pc98IdeState {
     ISADevice parent_obj;
@@ -94,13 +99,16 @@ struct Pc98IdeState {
     PortioList portio_list;
 };
 
-static inline bool pc98_ide_bus_empty(IDEBus *bus);
-
 /*
  * Port 0x432 chooses which of the two ATA channels is mapped into the shared
- * command block.  Port 0x430 is a separate connection/configuration register.
- * NP21W keeps independent latches for the two ports and only 0x432 affects
- * the selected channel.  A write with bit 7 set is a no-op guard.
+ * command block.  Bit 3 enables DWORD transfers through its data register;
+ * bit 6 reports that this controller supports slave devices.  Port 0x430 is
+ * a separate connection/configuration register.  NP21W keeps independent
+ * latches for the two ports and only 0x432 affects the selected channel.
+ * A write with bit 7 set is a no-op guard.
+ *
+ * The bit 3 and bit 6 semantics follow drachen6jp's analysis of NEC BIOSes
+ * and the Windows 2000 IDE driver.
  */
 static void pc98_ide_chsel_write(void *opaque, uint32_t addr, uint32_t val)
 {
@@ -111,9 +119,11 @@ static void pc98_ide_chsel_write(void *opaque, uint32_t addr, uint32_t val)
     if (val & 0x80) {
         return;
     }
-    s->bank_reg[reg] = val & 0x71;
     if (reg) {
-        s->cur_bus = &s->bus[val & 1];
+        s->bank_reg[1] = val & PC98_IDE_BANK_WRITABLE;
+        s->cur_bus = &s->bus[val & PC98_IDE_BANK_SECONDARY];
+    } else {
+        s->bank_reg[0] = val & PC98_IDE_CONN_WRITABLE;
     }
 }
 
@@ -124,7 +134,7 @@ static uint32_t pc98_ide_chsel_read(void *opaque, uint32_t addr)
     uint32_t ret;
 
     if (reg) {
-        ret = s->bank_reg[1] & 0x7f;
+        ret = s->bank_reg[1] | PC98_IDE_SLAVE_CAPABLE;
     } else {
         bool compatibility_mode;
         IDEBus *bus = s->cur_bus;
@@ -154,13 +164,16 @@ static uint32_t pc98_ide_chsel_read(void *opaque, uint32_t addr)
 }
 
 /*
- * Channel-presence companion register.  Bit 1 is visible only while channel
- * 1 is selected and that channel actually contains a device.  The PC-98
- * Windows 9x storage path accesses both 0x432 and 0x433 while enumerating
- * multiple channels.
+ * IRQ-source companion register.  Bits 0 and 1 report the live interrupt
+ * levels of the primary and secondary channels, respectively.  Reading an
+ * ATA status register deasserts the corresponding IDE-core IRQ level.  The
+ * Xa7 BIOS writes 0x01 here after reading status; accepting that write as a
+ * no-op matches the observed hardware-facing sequence without inventing a
+ * second interrupt latch.
  *
- * Port 0x435 is another read-only companion used by later NEC drivers; it
- * reads zero on the chipset used by the Xa7.
+ * This interpretation follows drachen6jp's IDE analysis and was confirmed by
+ * tracing the Xa7 BIOS IRQ handler.  Port 0x435 remains zero until its purpose
+ * is established independently.
  */
 static void pc98_ide_aux_write(void *opaque, uint32_t addr, uint32_t val)
 {
@@ -172,9 +185,8 @@ static uint32_t pc98_ide_aux_read(void *opaque, uint32_t addr)
     Pc98IdeState *s = opaque;
     uint32_t ret = 0;
 
-    if (addr == 0x433 && (s->bank_reg[1] & 1) &&
-        !pc98_ide_bus_empty(&s->bus[1])) {
-        ret = 0x02;
+    if (addr == 0x433) {
+        ret = s->irq_levels & 0x03;
     }
     pc98_ide_trace("auxrd", -1, ret);
     return ret;
@@ -222,19 +234,6 @@ static inline uint32_t pc98_ide_fixup_status(IDEBus *bus, uint32_t st)
         st |= SEEK_STAT;
     }
     return st;
-}
-
-/*
- * A bank with no drives must read as a floating bus (0xff), not 0x00 as
- * the shared IDE core returns.  The ITF probes each bank by watching the
- * DRQ bit: 0xff (DRQ stuck high) marks the bank as absent (drive class 7
- * in work-area 0x457), while 0x00 (DRQ clear) would make it register a
- * phantom second drive, and the IDE BIOS then hangs at POST waiting for
- * an interrupt from it.
- */
-static inline bool pc98_ide_bus_empty(IDEBus *bus)
-{
-    return !bus->ifs[0].blk && !bus->ifs[1].blk;
 }
 
 /* command block: 0x640 + reg*2 -> IDE register 'reg' on the current bank */
@@ -296,6 +295,10 @@ static void pc98_ide_data_writel(void *opaque, uint32_t addr, uint32_t val)
 {
     Pc98IdeState *s = opaque;
 
+    if (!(s->bank_reg[1] & PC98_IDE_BANK_DWORD)) {
+        pc98_ide_trace("wrl?", 0, val);
+        return;
+    }
     ide_data_writel(s->cur_bus, 0, val);
 }
 
@@ -303,6 +306,10 @@ static uint32_t pc98_ide_data_readl(void *opaque, uint32_t addr)
 {
     Pc98IdeState *s = opaque;
 
+    if (!(s->bank_reg[1] & PC98_IDE_BANK_DWORD)) {
+        pc98_ide_trace("rdl?", 0, 0xffffffff);
+        return 0xffffffff;
+    }
     return ide_data_readl(s->cur_bus, 0);
 }
 
@@ -407,7 +414,7 @@ static int pc98_ide_post_load(void *opaque, int version_id)
 {
     Pc98IdeState *s = opaque;
 
-    s->cur_bus = &s->bus[s->bank_reg[1] & 1];
+    s->cur_bus = &s->bus[s->bank_reg[1] & PC98_IDE_BANK_SECONDARY];
     qemu_set_irq(s->irq, s->irq_levels != 0);
     return 0;
 }
