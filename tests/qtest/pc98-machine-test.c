@@ -45,9 +45,18 @@
 #define PC98_SCSI_XFER_DONE  0x16
 #define PC98_SCSI_DATA_OUT   0x88
 #define PC98_SCSI_DATA_IN    0x89
+#define PC98_SCSI_SELECTED   0x11
+#define PC98_SCSI_COMMAND_OUT 0x8a
+#define PC98_SCSI_STATUS_IN  0x8b
+#define PC98_SCSI_MSG_OUT    0x8e
+#define PC98_SCSI_MSG_IN     0x8f
+#define PC98_SCSI_DISCONNECT 0x85
 #define PC98_SCSI_RESET      0x00
+#define PC98_SCSI_SELECT_ATN 0x06
 #define PC98_SCSI_SELECT_ATN_XFER 0x08
 #define PC98_SCSI_SELECT_XFER 0x09
+#define PC98_SCSI_TRANSFER_INFO 0x20
+#define PC98_SCSI_SINGLE_BYTE 0x80
 #define PC98_SCSI_CONTROL_DMA 0x8c
 #define PC98_SCSI_ROM_BASE    0x0d2000
 #define PC98_BIOS_INT1B_COMPAT_ENTRY 0x000fefc0
@@ -556,6 +565,83 @@ static void pc98_scsi_finish_command(QTestState *qts, uint8_t expected_status)
     g_assert_cmphex(status, ==, expected_status);
 }
 
+static uint8_t pc98_scsi_expect_irq(QTestState *qts, uint8_t expected_csr)
+{
+    uint8_t csr;
+
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_INT, PC98_SCSI_ASR_INT);
+    csr = pc98_scsi_reg_read(qts, PC98_SCSI_STATUS);
+    g_assert_cmphex(csr, ==, expected_csr);
+    return csr;
+}
+
+static void pc98_scsi_set_count(QTestState *qts, uint32_t byte_count)
+{
+    uint8_t count[3] = {
+        byte_count >> 16,
+        byte_count >> 8,
+        byte_count,
+    };
+
+    pc98_scsi_reg_write_buf(qts, PC98_SCSI_COUNT, count, sizeof(count));
+}
+
+/* Exercise the non-combination, polled-PIO sequence used by Linux/98. */
+static void pc98_scsi_linux_pio_start(QTestState *qts, const uint8_t *cdb,
+                                      size_t cdb_len, uint8_t data_csr)
+{
+    size_t i;
+
+    pc98_scsi_reg_write(qts, PC98_SCSI_DEST_ID, 0);
+    pc98_scsi_reg_write(qts, PC98_SCSI_TARGET_LUN, 0);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND, PC98_SCSI_SELECT_ATN);
+    g_test_message("  waiting for SELECTED");
+    pc98_scsi_expect_irq(qts, PC98_SCSI_SELECTED);
+    g_test_message("  waiting for MESSAGE OUT");
+    pc98_scsi_expect_irq(qts, PC98_SCSI_MSG_OUT);
+
+    pc98_scsi_set_count(qts, 1);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_TRANSFER_INFO);
+    g_test_message("  waiting for MESSAGE OUT DBR");
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    qtest_outb(qts, PC98_SCSI_DATA, 0x80); /* IDENTIFY, LUN 0 */
+    g_test_message("  waiting for COMMAND OUT");
+    pc98_scsi_expect_irq(qts, PC98_SCSI_COMMAND_OUT);
+
+    pc98_scsi_set_count(qts, cdb_len);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_TRANSFER_INFO);
+    g_test_message("  waiting for COMMAND OUT DBR");
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 0; i < cdb_len; i++) {
+        qtest_outb(qts, PC98_SCSI_DATA, cdb[i]);
+    }
+    g_test_message("  waiting for DATA phase");
+    pc98_scsi_expect_irq(qts, data_csr);
+}
+
+static void pc98_scsi_linux_pio_finish(QTestState *qts)
+{
+    uint8_t status;
+    uint8_t message;
+
+    pc98_scsi_expect_irq(qts, PC98_SCSI_STATUS_IN);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_TRANSFER_INFO | PC98_SCSI_SINGLE_BYTE);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    status = qtest_inb(qts, PC98_SCSI_DATA);
+    g_assert_cmphex(status, ==, 0);
+
+    pc98_scsi_expect_irq(qts, PC98_SCSI_MSG_IN);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_TRANSFER_INFO | PC98_SCSI_SINGLE_BYTE);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    message = qtest_inb(qts, PC98_SCSI_DATA);
+    g_assert_cmphex(message, ==, 0); /* COMMAND COMPLETE */
+    pc98_scsi_expect_irq(qts, PC98_SCSI_DISCONNECT);
+}
+
 static void pc98_scsi_setup_dma0(QTestState *qts, uint16_t address,
                                  uint16_t byte_count, uint8_t mode)
 {
@@ -692,6 +778,66 @@ static void test_pc98_scsi_pio_dma_rw(void)
     pc98_scsi_finish_command(qts, 0);
     qtest_memread(qts, dma_address, segmented_actual,
                   sizeof(segmented_actual));
+    g_assert_cmpmem(segmented_actual, sizeof(segmented_actual),
+                    segmented_expected, sizeof(segmented_expected));
+
+    /*
+     * Repeat a two-segment transfer through the non-combination PIO path.
+     * This catches both regressions seen with the Linux driver: clearing DBR
+     * when TRANSFER INFO starts, and failing to interrupt when the WD count
+     * reaches zero before the backend's larger buffer is exhausted.
+     */
+    write_cdb[5] = 11;
+    read_cdb[5] = 11;
+    qtest_outb(qts, PC98_SCSI_DMA, 0x02);
+    for (i = 0; i < sizeof(segmented_expected); i++) {
+        segmented_expected[i] = i * 43 + 0x19;
+    }
+
+    g_test_message("Linux-style segmented PIO WRITE: select and command");
+    pc98_scsi_linux_pio_start(qts, write_cdb, sizeof(write_cdb),
+                              PC98_SCSI_DATA_OUT);
+    pc98_scsi_set_count(qts, 512);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_TRANSFER_INFO);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 0; i < 512; i++) {
+        qtest_outb(qts, PC98_SCSI_DATA, segmented_expected[i]);
+    }
+    g_test_message("Linux-style segmented PIO WRITE: first boundary");
+    pc98_scsi_expect_irq(qts, PC98_SCSI_DATA_OUT);
+    pc98_scsi_set_count(qts, 512);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_TRANSFER_INFO);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 512; i < sizeof(segmented_expected); i++) {
+        qtest_outb(qts, PC98_SCSI_DATA, segmented_expected[i]);
+    }
+    g_test_message("Linux-style segmented PIO WRITE: completion");
+    pc98_scsi_linux_pio_finish(qts);
+
+    memset(segmented_actual, 0, sizeof(segmented_actual));
+    g_test_message("Linux-style segmented PIO READ: select and command");
+    pc98_scsi_linux_pio_start(qts, read_cdb, sizeof(read_cdb),
+                              PC98_SCSI_DATA_IN);
+    pc98_scsi_set_count(qts, 512);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_TRANSFER_INFO);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 0; i < 512; i++) {
+        segmented_actual[i] = qtest_inb(qts, PC98_SCSI_DATA);
+    }
+    g_test_message("Linux-style segmented PIO READ: first boundary");
+    pc98_scsi_expect_irq(qts, PC98_SCSI_DATA_IN);
+    pc98_scsi_set_count(qts, 512);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_TRANSFER_INFO);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_DBR, PC98_SCSI_ASR_DBR);
+    for (i = 512; i < sizeof(segmented_actual); i++) {
+        segmented_actual[i] = qtest_inb(qts, PC98_SCSI_DATA);
+    }
+    g_test_message("Linux-style segmented PIO READ: completion");
+    pc98_scsi_linux_pio_finish(qts);
     g_assert_cmpmem(segmented_actual, sizeof(segmented_actual),
                     segmented_expected, sizeof(segmented_expected));
 

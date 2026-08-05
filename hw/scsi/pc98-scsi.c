@@ -694,7 +694,19 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
 
     case CMD_TRANSFER_INFO:
         if (s->phase == PHASE_DATA_IN || s->phase == PHASE_DATA_OUT) {
-            pc98_scsi_start_data(s);
+            /*
+             * A non-combination command first reports the new DATA phase.
+             * After the guest acknowledges that interrupt, TRANSFER INFO
+             * starts the actual programmed-I/O handshake.  Do not raise a
+             * second phase interrupt here: pc98_scsi_raise_irq() clears DBR,
+             * which made Linux's WD33C93 PIO loop return without moving a
+             * single byte.  The final data byte (or a transfer-count
+             * boundary) supplies the next interrupt.
+             */
+            if (s->async_len) {
+                s->asr &= ~(ASR_INT | ASR_BSY);
+                s->asr |= ASR_DBR;
+            }
         } else if (s->phase == PHASE_STATUS_IN) {
             /*
              * The phase interrupt only announces STATUS IN.  TRANSFER INFO
@@ -767,6 +779,15 @@ static uint8_t pc98_scsi_data_read(Pc98ScsiState *s)
         }
         if (!s->async_len) {
             pc98_scsi_finish_chunk(s);
+        } else if (count && !pc98_scsi_get_count(s)) {
+            /*
+             * The backend buffer may span several Linux scatter-gather
+             * segments.  Stop at the programmed WD transfer count and let
+             * the initiator program the next segment, just as the DMA path
+             * does.
+             */
+            s->asr &= ~ASR_DBR;
+            pc98_scsi_raise_irq(s, CSR_DATA_IN);
         }
     }
     return value;
@@ -820,6 +841,9 @@ static void pc98_scsi_data_write(Pc98ScsiState *s, uint8_t value)
         }
         if (!s->async_len) {
             pc98_scsi_finish_chunk(s);
+        } else if (count && !pc98_scsi_get_count(s)) {
+            s->asr &= ~ASR_DBR;
+            pc98_scsi_raise_irq(s, CSR_DATA_OUT);
         }
     }
 }
