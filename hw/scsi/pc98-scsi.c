@@ -283,6 +283,9 @@ static int pc98_scsi_dma_transfer(void *opaque, int nchan,
         return dma_pos;
     }
 
+    trace_pc98_scsi_dma_transfer(nchan, dma_pos, dma_len, s->async_len,
+                                 tc, count);
+
     if (s->req_to_initiator) {
         dc->write_memory(s->dma, nchan, s->async_buf, dma_pos, count);
     } else {
@@ -297,6 +300,18 @@ static int pc98_scsi_dma_transfer(void *opaque, int nchan,
 
     if (!s->async_len) {
         pc98_scsi_finish_chunk(s);
+    } else if (tc && !pc98_scsi_get_count(s)) {
+        /*
+         * The backend can present a large contiguous data chunk while the
+         * WD33C93 transfer count describes only the current initiator
+         * scatter-gather segment.  A real controller interrupts in the
+         * current data phase when that count reaches zero.  The generic
+         * Linux wd33c93 driver then programs the next segment and resumes
+         * the combination command with command phase 45h.
+         */
+        pc98_scsi_release_dma(s);
+        pc98_scsi_raise_irq(s, s->req_to_initiator ?
+                            CSR_DATA_IN : CSR_DATA_OUT);
     }
     return dma_pos;
 }
@@ -613,6 +628,18 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
 
     case CMD_SELECT_ATN_XFER:
     case CMD_SELECT_XFER:
+        /*
+         * Command phase 45h resumes the data phase of an interrupted
+         * level-2 select-and-transfer operation.  Do not submit the CDB a
+         * second time: the target request still owns the untransferred
+         * backend buffer.
+         */
+        if (s->req && s->regs[SBIC_CMD_PHASE] == 0x45 &&
+            (s->phase == PHASE_DATA_IN || s->phase == PHASE_DATA_OUT)) {
+            s->sat = true;
+            pc98_scsi_start_data(s);
+            break;
+        }
         cdb_len = scsi_cdb_length(&s->regs[SBIC_CDB]);
         if ((int)cdb_len <= 0 || cdb_len > sizeof(s->cdb)) {
             s->asr |= ASR_LCI;
@@ -897,7 +924,17 @@ static void pc98_scsi_io_write(void *opaque, uint32_t port, uint32_t data)
     case PC98_SCSI_IOBASE + 4:
         if (value == BOARD_DMA_ENABLE) {
             s->board_dma = BOARD_DMA_ENABLE;
-            pc98_scsi_start_data(s);
+            /*
+             * Linux/98 enables the board DMA gate in dma_setup() before
+             * the generic WD33C93 core programs the next transfer count
+             * and issues TRANSFER INFO (or resumes a level-2 command).
+             * Real hardware cannot assert DREQ until that controller
+             * command.  In a paused data phase, therefore, a zero count
+             * means that we must wait for the following WD command.
+             */
+            if (pc98_scsi_get_count(s)) {
+                pc98_scsi_start_data(s);
+            }
         } else if (value == BOARD_DMA_DISABLE) {
             s->board_dma = 0;
             pc98_scsi_release_dma(s);

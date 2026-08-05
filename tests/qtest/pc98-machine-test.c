@@ -43,6 +43,8 @@
 #define PC98_SCSI_ASR_DBR    0x01
 #define PC98_SCSI_RESET_DONE 0x01
 #define PC98_SCSI_XFER_DONE  0x16
+#define PC98_SCSI_DATA_OUT   0x88
+#define PC98_SCSI_DATA_IN    0x89
 #define PC98_SCSI_RESET      0x00
 #define PC98_SCSI_SELECT_ATN_XFER 0x08
 #define PC98_SCSI_SELECT_XFER 0x09
@@ -515,10 +517,29 @@ static void pc98_scsi_setup_linux_dma_command(QTestState *qts,
     pc98_scsi_reg_write(qts, PC98_SCSI_DEST_ID, 0);
     pc98_scsi_reg_write(qts, PC98_SCSI_TARGET_LUN, 0);
     pc98_scsi_reg_write(qts, PC98_SCSI_CMD_PHASE, 0);
-    pc98_scsi_reg_write_buf(qts, PC98_SCSI_COUNT, count, sizeof(count));
     pc98_scsi_reg_write_buf(qts, PC98_SCSI_CDB, cdb, cdb_len);
     pc98_scsi_reg_write(qts, PC98_SCSI_OWN_ID, cdb_len);
+    qtest_outb(qts, PC98_SCSI_DMA, 0x01);
+    pc98_scsi_reg_write_buf(qts, PC98_SCSI_COUNT, count, sizeof(count));
     pc98_scsi_reg_write(qts, PC98_SCSI_CONTROL, PC98_SCSI_CONTROL_DMA);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_SELECT_ATN_XFER);
+}
+
+static void pc98_scsi_resume_linux_dma(QTestState *qts,
+                                       uint32_t byte_count)
+{
+    uint8_t count[3] = {
+        byte_count >> 16,
+        byte_count >> 8,
+        byte_count,
+    };
+
+    /* pc980155_dma_setup() opens the board gate before wd33c93.c resumes. */
+    qtest_outb(qts, PC98_SCSI_DMA, 0x01);
+    pc98_scsi_reg_write(qts, PC98_SCSI_CONTROL, PC98_SCSI_CONTROL_DMA);
+    pc98_scsi_reg_write_buf(qts, PC98_SCSI_COUNT, count, sizeof(count));
+    pc98_scsi_reg_write(qts, PC98_SCSI_CMD_PHASE, 0x45);
     pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
                         PC98_SCSI_SELECT_ATN_XFER);
 }
@@ -561,6 +582,8 @@ static void test_pc98_scsi_pio_dma_rw(void)
     uint8_t tur_cdb[6] = { 0 };
     uint8_t expected[512];
     uint8_t actual[512];
+    uint8_t segmented_expected[1024];
+    uint8_t segmented_actual[1024];
     const uint32_t dma_address = 0x8000;
     int fd;
     int i;
@@ -620,7 +643,6 @@ static void test_pc98_scsi_pio_dma_rw(void)
     pc98_scsi_setup_dma0(qts, dma_address, sizeof(expected), 0x48);
     pc98_scsi_setup_linux_dma_command(qts, write_cdb, sizeof(write_cdb),
                                       sizeof(expected));
-    qtest_outb(qts, PC98_SCSI_DMA, 0x01);
     pc98_scsi_finish_command(qts, 0);
 
     memset(actual, 0, sizeof(actual));
@@ -628,10 +650,50 @@ static void test_pc98_scsi_pio_dma_rw(void)
     pc98_scsi_setup_dma0(qts, dma_address, sizeof(actual), 0x44);
     pc98_scsi_setup_linux_dma_command(qts, read_cdb, sizeof(read_cdb),
                                       sizeof(actual));
-    qtest_outb(qts, PC98_SCSI_DMA, 0x01);
     pc98_scsi_finish_command(qts, 0);
     qtest_memread(qts, dma_address, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+
+    /*
+     * A block request may be larger than the current Linux scatter-gather
+     * segment.  The WD count reaches zero after the first segment while the
+     * SCSI request remains active, then command phase 45h resumes it.
+     */
+    write_cdb[5] = 9;
+    write_cdb[8] = 2;
+    read_cdb[5] = 9;
+    read_cdb[8] = 2;
+    for (i = 0; i < sizeof(segmented_expected); i++) {
+        segmented_expected[i] = i * 29 + 0x71;
+    }
+
+    qtest_memwrite(qts, dma_address, segmented_expected, 512);
+    pc98_scsi_setup_dma0(qts, dma_address, 512, 0x48);
+    pc98_scsi_setup_linux_dma_command(qts, write_cdb, sizeof(write_cdb),
+                                      512);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_INT, PC98_SCSI_ASR_INT);
+    g_assert_cmphex(pc98_scsi_reg_read(qts, PC98_SCSI_STATUS), ==,
+                    PC98_SCSI_DATA_OUT);
+    qtest_memwrite(qts, dma_address + 512, segmented_expected + 512, 512);
+    pc98_scsi_setup_dma0(qts, dma_address + 512, 512, 0x48);
+    pc98_scsi_resume_linux_dma(qts, 512);
+    pc98_scsi_finish_command(qts, 0);
+
+    memset(segmented_actual, 0, sizeof(segmented_actual));
+    qtest_memwrite(qts, dma_address, segmented_actual,
+                   sizeof(segmented_actual));
+    pc98_scsi_setup_dma0(qts, dma_address, 512, 0x44);
+    pc98_scsi_setup_linux_dma_command(qts, read_cdb, sizeof(read_cdb), 512);
+    pc98_scsi_wait_asr(qts, PC98_SCSI_ASR_INT, PC98_SCSI_ASR_INT);
+    g_assert_cmphex(pc98_scsi_reg_read(qts, PC98_SCSI_STATUS), ==,
+                    PC98_SCSI_DATA_IN);
+    pc98_scsi_setup_dma0(qts, dma_address + 512, 512, 0x44);
+    pc98_scsi_resume_linux_dma(qts, 512);
+    pc98_scsi_finish_command(qts, 0);
+    qtest_memread(qts, dma_address, segmented_actual,
+                  sizeof(segmented_actual));
+    g_assert_cmpmem(segmented_actual, sizeof(segmented_actual),
+                    segmented_expected, sizeof(segmented_expected));
 
     qtest_quit(qts);
     g_assert_cmpint(g_remove(image), ==, 0);

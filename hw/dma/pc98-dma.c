@@ -50,6 +50,7 @@
 #include "qemu/log.h"
 #include "qom/object.h"
 #include "migration/vmstate.h"
+#include "trace.h"
 
 #define ADDR 0
 #define COUNT 1
@@ -361,10 +362,16 @@ static void pc98_dma_release_DREQ(IsaDma *obj, int nchan)
     pc98_dma_run(d);
 }
 
+static hwaddr pc98_dma_addr(Pc98DmaState *d, Pc98DmaRegs *r);
+
 static void pc98_dma_channel_run(Pc98DmaState *d, int ichan)
 {
     Pc98DmaRegs *r = &d->regs[ichan];
     int n;
+
+    trace_pc98_dma_channel_run(ichan, pc98_dma_addr(d, r),
+                               r->base[COUNT] + 1, r->now[COUNT],
+                               r->mode, d->mask, d->status);
 
     n = r->transfer_handler(r->opaque, ichan,
                             r->now[COUNT], r->base[COUNT] + 1);
@@ -391,6 +398,7 @@ static void pc98_dma_channel_run(Pc98DmaState *d, int ichan)
     if (n == r->base[COUNT] + 1) {
         d->status |= (1 << ichan);
     }
+    trace_pc98_dma_channel_result(ichan, n, d->status);
 }
 
 static void pc98_dma_run(void *opaque)
