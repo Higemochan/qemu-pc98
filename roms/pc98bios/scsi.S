@@ -43,7 +43,8 @@
 	.equ	WA_BOOT_SEG,		0x04ae
 	.equ	WA_BOOT_DEVICE,		0x0584
 
-	.equ	MAIN_INT1B_OFF,		0x17c0
+	.equ	MAIN_INT1B_REAL_OFF,	0x17c0
+	.equ	MAIN_INT1B_FREE_OFF,	0x17c4
 	.equ	MAIN_BIOS_SEG,		0xfd80
 	.equ	BOOT_SEGMENT,		0x1fc0
 	/* PC-9801-92 compatible BIOS logical geometry (8 GiB limit). */
@@ -131,9 +132,9 @@ rom_init:
 
 	/*
 	 * The SCSI ROM is initialised before the internal IDE ROM.  Interpose
-	 * INT 1Bh now and chain every non-SCSI request to the main BIOS.  Both
-	 * the free firmware and the Xa7-family firmware use FD80:17C0 for that
-	 * dispatcher, matching the original PC-9801-92 ROM convention.
+	 * INT 1Bh now and chain every non-SCSI request to the main BIOS.  The
+	 * free firmware publishes a stable, signed entry at FD80:17C4h; the
+	 * original Xa7-family convention uses FD80:17C0h.
 	 */
 	cli
 	movw	$int1b_hook, 0x006c
@@ -290,7 +291,26 @@ int1b_hook:
 	cmpb	$0xc0, %al
 	je	1f
 	popw	%ax
-	ljmp	$MAIN_BIOS_SEG, $MAIN_INT1B_OFF
+	/*
+	 * The free BIOS carries "Q98" after its fixed chain trampoline.  Test
+	 * that marker without consuming any caller register.  A firmware that
+	 * lacks it is treated as an original Xa7-family BIOS.
+	 */
+	pushw	%ds
+	pushw	%ax
+	movw	$MAIN_BIOS_SEG, %ax
+	movw	%ax, %ds
+	cmpw	$0x3951, MAIN_INT1B_FREE_OFF + 3
+	jne	2f
+	cmpb	$0x38, MAIN_INT1B_FREE_OFF + 5
+	jne	2f
+	popw	%ax
+	popw	%ds
+	ljmp	$MAIN_BIOS_SEG, $MAIN_INT1B_FREE_OFF
+2:
+	popw	%ax
+	popw	%ds
+	ljmp	$MAIN_BIOS_SEG, $MAIN_INT1B_REAL_OFF
 1:
 	popw	%ax
 	pushw	%ds

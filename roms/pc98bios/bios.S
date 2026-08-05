@@ -3651,6 +3651,18 @@ ascii_table:
 ascii_table_end:
 
 	/*
+	 * Stable entry used by the free PC-9801-92 SCSI option ROM when it
+	 * chains non-SCSI INT 1Bh requests back to the main BIOS.  Keep the
+	 * Q98 marker immediately after the jump: the option ROM uses it to
+	 * distinguish this ABI from the original Xa7 FD80:17C0h dispatcher.
+	 * The fixed file offset 16FC4h maps to FD80:17C4h.
+	 */
+	.org	0x16fc4
+int1b_option_chain:
+	jmp	int1b
+	.ascii	"Q98"
+
+	/*
 	 * Plug and Play BIOS bi-modal runtime entry at FD80:1800h.
 	 *
 	 * The interface follows the 1.0A 16-bit C stack convention.  Both real

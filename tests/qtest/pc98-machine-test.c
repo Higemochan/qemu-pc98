@@ -632,7 +632,8 @@ static void test_pc98_scsi_cd_read(void)
     g_assert_no_error(err);
     g_assert_cmpint(fd, >=, 0);
     g_assert_cmpint(ftruncate(fd, 64 * 2048), ==, 0);
-    g_assert_cmpint(pwrite(fd, pvd, sizeof(pvd), 16 * 2048), ==,
+    g_assert_cmpint(lseek(fd, 16 * 2048, SEEK_SET), ==, 16 * 2048);
+    g_assert_cmpint(qemu_write_full(fd, pvd, sizeof(pvd)), ==,
                     sizeof(pvd));
     close(fd);
 
