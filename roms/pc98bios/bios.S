@@ -3635,20 +3635,17 @@ int1f_move_return:
 	popw	%bp
 	iret
 
-/*
- * Unshifted common-key subset indexed by the PC-98 scan code delivered by
- * the emulated keyboard.  Zero means "scan code only".
- */
-ascii_table:
-	.byte	0x1b
-	.ascii	"1234567890-^"
-	.byte	'\\', 0x08, 0x09
-	.ascii	"qwertyuiop@["
-	.byte	0x0d
-	.ascii	"asdfghjkl;:]"
-	.ascii	"zxcvbnm,./"
-	.byte	0x00, 0x20
-ascii_table_end:
+	/*
+	 * Stable fixed-disk dispatcher entry used by PC-98 option ROMs.
+	 *
+	 * Keep this address independent of the main BIOS layout.  In
+	 * particular, the free PC-9801-92 ROM chains non-SCSI INT 1Bh requests
+	 * here just as the original ROM does with NEC firmware.  The real
+	 * dispatcher is free to move as the BIOS grows.
+	 */
+	.org	(FD80_FILE_BASE + 0x17c0)
+fixed_disk_int1b_entry:
+	jmp	int1b
 
 	/*
 	 * Stable entry used by the free PC-9801-92 SCSI option ROM when it
@@ -3828,6 +3825,24 @@ pnp_apm_node:
 	.byte	0x79, 0x00		/* possible-resource End Tag */
 	.byte	0x79, 0x00		/* compatible-ID End Tag */
 pnp_apm_node_end:
+
+	/*
+	 * Unshifted common-key subset indexed by the PC-98 scan code delivered
+	 * by the emulated keyboard.  Zero means "scan code only".  It used to
+	 * occupy FD80:178F and overlapped the option-ROM ABI entry at 17C0h as
+	 * the table grew; keep ordinary data outside that fixed entry now.
+	 */
+	.org	(FD80_FILE_BASE + 0x1900)
+ascii_table:
+	.byte	0x1b
+	.ascii	"1234567890-^"
+	.byte	'\\', 0x08, 0x09
+	.ascii	"qwertyuiop@["
+	.byte	0x0d
+	.ascii	"asdfghjkl;:]"
+	.ascii	"zxcvbnm,./"
+	.byte	0x00, 0x20
+ascii_table_end:
 
 	/* CPU reset while the main bank is already selected. */
 	.org	0x17ff0

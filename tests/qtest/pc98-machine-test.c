@@ -29,7 +29,11 @@
 #define PC98_SCSI_DMA       0x0cc4
 #define PC98_SCSI_DATA      0x0cc6
 
+#define PC98_SCSI_OWN_ID     0x00
+#define PC98_SCSI_CONTROL    0x01
+#define PC98_SCSI_CDB        0x03
 #define PC98_SCSI_TARGET_LUN 0x0f
+#define PC98_SCSI_CMD_PHASE  0x10
 #define PC98_SCSI_COUNT      0x12
 #define PC98_SCSI_DEST_ID    0x15
 #define PC98_SCSI_STATUS     0x17
@@ -40,8 +44,11 @@
 #define PC98_SCSI_RESET_DONE 0x01
 #define PC98_SCSI_XFER_DONE  0x16
 #define PC98_SCSI_RESET      0x00
+#define PC98_SCSI_SELECT_ATN_XFER 0x08
 #define PC98_SCSI_SELECT_XFER 0x09
+#define PC98_SCSI_CONTROL_DMA 0x8c
 #define PC98_SCSI_ROM_BASE    0x0d2000
+#define PC98_BIOS_INT1B_COMPAT_ENTRY 0x000fefc0
 
 #define PC98_DMA0_ADDR       0x01
 #define PC98_DMA0_COUNT      0x03
@@ -489,8 +496,31 @@ static void pc98_scsi_setup_command(QTestState *qts, const uint8_t *cdb,
     pc98_scsi_reg_write(qts, PC98_SCSI_DEST_ID, 0);
     pc98_scsi_reg_write(qts, PC98_SCSI_TARGET_LUN, 0);
     pc98_scsi_reg_write_buf(qts, PC98_SCSI_COUNT, count, sizeof(count));
-    pc98_scsi_reg_write_buf(qts, 0x03, cdb, cdb_len);
+    pc98_scsi_reg_write_buf(qts, PC98_SCSI_CDB, cdb, cdb_len);
     pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND, PC98_SCSI_SELECT_XFER);
+}
+
+/* Program the exact WD33C93 sequence used by Linux's PC-9801-55/92 driver. */
+static void pc98_scsi_setup_linux_dma_command(QTestState *qts,
+                                               const uint8_t *cdb,
+                                               size_t cdb_len,
+                                               uint32_t byte_count)
+{
+    uint8_t count[3] = {
+        byte_count >> 16,
+        byte_count >> 8,
+        byte_count,
+    };
+
+    pc98_scsi_reg_write(qts, PC98_SCSI_DEST_ID, 0);
+    pc98_scsi_reg_write(qts, PC98_SCSI_TARGET_LUN, 0);
+    pc98_scsi_reg_write(qts, PC98_SCSI_CMD_PHASE, 0);
+    pc98_scsi_reg_write_buf(qts, PC98_SCSI_COUNT, count, sizeof(count));
+    pc98_scsi_reg_write_buf(qts, PC98_SCSI_CDB, cdb, cdb_len);
+    pc98_scsi_reg_write(qts, PC98_SCSI_OWN_ID, cdb_len);
+    pc98_scsi_reg_write(qts, PC98_SCSI_CONTROL, PC98_SCSI_CONTROL_DMA);
+    pc98_scsi_reg_write(qts, PC98_SCSI_COMMAND,
+                        PC98_SCSI_SELECT_ATN_XFER);
 }
 
 static void pc98_scsi_finish_command(QTestState *qts, uint8_t expected_status)
@@ -581,16 +611,23 @@ static void test_pc98_scsi_pio_dma_rw(void)
         expected[i] = i * 53 + 0xc3;
     }
     qtest_memwrite(qts, dma_address, expected, sizeof(expected));
-    pc98_scsi_setup_dma0(qts, dma_address, sizeof(expected), 0x08);
-    pc98_scsi_setup_command(qts, write_cdb, sizeof(write_cdb),
-                            sizeof(expected));
+    /*
+     * Use the single-transfer modes programmed by Linux's PC-9801-55/92
+     * driver, rather than relying on the otherwise equivalent demand-mode
+     * values.  This keeps the qtest sequence identical to a physical-board
+     * transfer through the PC-98 DMA controller.
+     */
+    pc98_scsi_setup_dma0(qts, dma_address, sizeof(expected), 0x48);
+    pc98_scsi_setup_linux_dma_command(qts, write_cdb, sizeof(write_cdb),
+                                      sizeof(expected));
     qtest_outb(qts, PC98_SCSI_DMA, 0x01);
     pc98_scsi_finish_command(qts, 0);
 
     memset(actual, 0, sizeof(actual));
     qtest_memwrite(qts, dma_address, actual, sizeof(actual));
-    pc98_scsi_setup_dma0(qts, dma_address, sizeof(actual), 0x04);
-    pc98_scsi_setup_command(qts, read_cdb, sizeof(read_cdb), sizeof(actual));
+    pc98_scsi_setup_dma0(qts, dma_address, sizeof(actual), 0x44);
+    pc98_scsi_setup_linux_dma_command(qts, read_cdb, sizeof(read_cdb),
+                                      sizeof(actual));
     qtest_outb(qts, PC98_SCSI_DMA, 0x01);
     pc98_scsi_finish_command(qts, 0);
     qtest_memread(qts, dma_address, actual, sizeof(actual));
@@ -605,12 +642,19 @@ static void test_pc98_scsi_free_bios_rom(void)
     static const uint8_t signature[] = { 0x55, 0xaa, 0x02 };
     QTestState *qts;
     uint8_t actual[sizeof(signature)];
+    uint8_t opcode;
 
     qts = qtest_init(
         "-machine pc9801 -nodefaults -display none "
         "-drive if=scsi,format=raw,file=null-co://");
     qtest_memread(qts, PC98_SCSI_ROM_BASE + 9, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual), signature, sizeof(signature));
+
+    /* The SCSI ROM chains IDE/FDD requests through the fixed FD80:17C0 ABI. */
+    qtest_outb(qts, PC98_ROM_BANK_PORT, 0xee); /* map firmware bank 7 */
+    qtest_memread(qts, PC98_BIOS_INT1B_COMPAT_ENTRY, &opcode,
+                  sizeof(opcode));
+    g_assert_cmphex(opcode, ==, 0xe9); /* near JMP to the live dispatcher */
     qtest_quit(qts);
 }
 
