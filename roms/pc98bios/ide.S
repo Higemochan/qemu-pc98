@@ -170,7 +170,6 @@ init_entry:
 	pushl	%ebx
 	pushl	%ecx
 	pushl	%edx
-	pushl	%ebp
 
 	pushw	%ds
 	pushw	%ax
@@ -289,7 +288,6 @@ init_entry:
 	popw	%dx
 	popw	%ax
 	popw	%ds
-	popl	%ebp
 	popl	%edx
 	popl	%ecx
 	popl	%ebx
