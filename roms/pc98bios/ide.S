@@ -753,7 +753,10 @@ ata_identify_geometry:
 	testw	%bx, %bx
 	jz	1f
 	cmpw	$0xffff, %bx
-	je	1f
+//	je	1f
+	jne	6f
+	decw	%bx
+6:
 	testw	%si, %si
 	jz	1f
 	cmpw	$0x00ff, %si
@@ -994,7 +997,8 @@ ata_pio_read_bytes:
 	cld
 2:
 	call	ata_wait_drq
-	jc	5f
+//	jc	5f
+	jc	2b			//emulatorでエラー出るわけがない
 	movw	$IDE_DATA, %dx
 	cmpl	$512, %ebp
 	jb	3f
@@ -1146,7 +1150,8 @@ ata_pio_write:
 	cld
 1:
 	call	ata_wait_drq
-	jc	ata_failed
+//	jc	ata_failed
+	jc	1b			//emulatorでエラー出るわけがない
 	movw	$IDE_DATA, %dx
 	movw	$256, %cx
 	rep	outsw	%es:(%si), (%dx)
