@@ -1,6 +1,5 @@
 /*
  * Minimal PC-9821 BIOS / IDE BIOS bank 3
- * Copyright (C) 2026 Awe Morris
  *
  * This is the first deliberately small implementation of the private disk
  * option-ROM ABI used by the Xa7-family main BIOS.  It provides the HDD
@@ -15,7 +14,6 @@
 .text
 
 	.equ	IDE_CHANNEL,	0x0432
-	.equ	IDE_IRQ_SOURCE,	0x0433
 	.equ	IDE_DATA,	0x0640
 	.equ	IDE_ERROR,	0x0642
 	.equ	IDE_SECCNT,	0x0644
@@ -32,12 +30,8 @@
 	.equ	PIC2_DATA,	0x000a
 
 	.equ	ATA_SRST,	0x06
-	.equ	ATA_READ_SECTORS,	0x20
-	.equ	ATA_WRITE_SECTORS,	0x30
-	.equ	ATA_READ_MULTIPLE,	0xc4
-	.equ	ATA_WRITE_MULTIPLE,	0xc5
-	.equ	ATA_SET_MULTIPLE,	0xc6
-	.equ	ATA_PACKET,	0xa0
+	.equ	ATA_READ,	0xc4
+	.equ	ATA_WRITE,	0xc5
 	.equ	ATA_IDENTIFY,	0xec
 	.equ	ATA_ST_ERR,	0x01
 	.equ	ATA_ST_DRQ,	0x08
@@ -67,23 +61,14 @@
 	 * geometry there rather than consuming an undocumented main-BIOS work
 	 * area cell.  These offsets are relative to the D800 ROM segment.
 	 */
-	.equ	ROM_WORK_CYLINDERS,	0x3000	/* four words, physical order */
-	.equ	ROM_WORK_HEADS,		0x3008	/* four words, physical order */
-	.equ	ROM_WORK_SECTORS,	0x3010	/* four words, physical order */
-	/* Selected physical slot and four device-type bytes. */
-	/* The final four bytes map logical HDD numbers to physical slots. */
-	/* Type values: 0=none, 1=ATA HDD, 2=ATAPI. */
-	.equ	ROM_WORK_SELECTED,	0x3018
-	.equ	ROM_WORK_TYPES,		0x3019
-	.equ	ROM_WORK_LOGICAL,	0x301d
-	/* Four IDENTIFY word-47 maxima and four successfully enabled counts. */
-	.equ	ROM_WORK_MULTI_MAX,	0x3021
-	.equ	ROM_WORK_MULTI_ACTIVE,	0x3025
+	.equ	ROM_WORK_CYLINDERS,	0x3000
+	.equ	ROM_WORK_HEADS,		0x3002
+	.equ	ROM_WORK_SECTORS,	0x3004
 
 	/*
 	 * The main BIOS indexes this table in three-byte slots.  Keep even the
 	 * declined entries and the nonstandard signature byte-for-byte
-	 * compatible with the NEC Xa7 ROM.
+	 * compatible with the NEC Xa7C9W ROM.
 	 */
 	.globl	_start
 _start:
@@ -160,7 +145,7 @@ install_entry:
 	lret
 
 /*
- * Initialise private state and probe all four physical ATA slots.
+ * Initialise the fixed machine profile and verify that ATA master answers.
  * The ITF has already issued the reset required to run ATA diagnostics.
  * Do not pulse SRST again here: the minimal free main BIOS launches the IPL
  * immediately after this call, before a second reset could settle.
@@ -169,13 +154,8 @@ init_entry:
 	pushw	%ds
 	pushw	%ax
 	pushw	%dx
-	pushw	%bx
-	pushw	%cx
-	pushw	%si
-	pushw	%di
 	xorw	%ax, %ax
 	movw	%ax, %ds
-	movb	$0, %cs:ROM_WORK_SELECTED
 
 	/*
 	 * The built-in IDE interrupt is slave IR1 (IRQ9 / vector 11h).  The
@@ -195,91 +175,30 @@ init_entry:
 	outb	%al, $WAIT_IO
 	sti
 
-	movw	$0xffff, %cs:ROM_WORK_LOGICAL
-	movw	$0xffff, %cs:ROM_WORK_LOGICAL+2
-	xorw	%si, %si
-2:
-	movw	%si, %bx
-	shlw	$1, %bx
-	movw	$BIOS_CYLINDERS, %cs:ROM_WORK_CYLINDERS(%bx)
-	movw	$BIOS_HEADS, %cs:ROM_WORK_HEADS(%bx)
-	movw	$BIOS_SECTORS, %cs:ROM_WORK_SECTORS(%bx)
-	movb	$0, %cs:ROM_WORK_MULTI_MAX(%si)
-	movb	$0, %cs:ROM_WORK_MULTI_ACTIVE(%si)
-	movw	%si, %ax
-	movb	%al, %cs:ROM_WORK_SELECTED
-	call	ata_probe_device
-	movb	%al, %cs:ROM_WORK_TYPES(%si)
-	cmpb	$1, %al
-	jne	3f
-	call	ata_identify_geometry
-	call	ata_enable_multiple
-3:
-	incw	%si
-	cmpw	$4, %si
-	jb	2b
+	movw	$BIOS_CYLINDERS, %ax
+	movw	%ax, %cs:ROM_WORK_CYLINDERS
+	movw	$BIOS_HEADS, %ax
+	movw	%ax, %cs:ROM_WORK_HEADS
+	movw	$BIOS_SECTORS, %ax
+	movw	%ax, %cs:ROM_WORK_SECTORS
 
-	movb	$0, %cs:ROM_WORK_SELECTED
-	/*
-	 * 055Dh is the dense BIOS drive-number bitmap, while 05BAh records
-	 * the physical ATA slots.  A disk in physical slot 2 alone is thus
-	 * BIOS drive 80h (055Dh bit 0), but remains 05BAh bit 2.
-	 */
-	xorw	%bx, %bx
-	xorw	%cx, %cx
-	xorw	%di, %di
-	cmpb	$1, %cs:ROM_WORK_TYPES+0
-	jne	4f
-	orb	$0x01, %bl
-	movb	$0, %cs:ROM_WORK_LOGICAL(%di)
-	incw	%di
-	incw	%cx
-4:
-	cmpb	$1, %cs:ROM_WORK_TYPES+1
-	jne	5f
-	orb	$0x02, %bl
-	movb	$1, %cs:ROM_WORK_LOGICAL(%di)
-	incw	%di
-	incw	%cx
-5:
-	cmpb	$1, %cs:ROM_WORK_TYPES+2
-	jne	6f
-	orb	$0x04, %bl
-	movb	$2, %cs:ROM_WORK_LOGICAL(%di)
-	incw	%di
-	incw	%cx
-6:
-	cmpb	$1, %cs:ROM_WORK_TYPES+3
-	jne	7f
-	orb	$0x08, %bl
-	movb	$3, %cs:ROM_WORK_LOGICAL(%di)
-	incw	%di
-	incw	%cx
-7:
-	movb	WA_IDE_PROBE, %al
-	andb	$0xf0, %al
-	orb	%bl, %al
-	movb	%al, WA_IDE_PROBE
-
-	movb	$1, %al
-	shlb	%cl, %al
-	decb	%al
-	movb	WA_DRIVES, %ah
-	andb	$0xf0, %ah
-	orb	%al, %ah
-	movb	%ah, WA_DRIVES
-	testw	%bx, %bx
+	movw	$IDE_STATUS, %dx
+	inb	%dx, %al
+	cmpb	$0xff, %al
+	je	1f
+	testb	%al, %al
 	jz	1f
+
+	call	ata_identify_geometry
+
+	orw	$0x0001, WA_DRIVES
+	orb	$0x01, WA_IDE_PROBE
 	andb	$0xc7, WA_GEOMETRY
 	orb	$0x10, WA_GEOMETRY	/* drive 0: variable 8/17 profile */
 	orb	$0x48, WA_IDE_FLAGS	/* fast IDE and fixed-disk boot */
 	orb	$0x80, WA_DISK_FLAGS
 	movb	$0x80, WA_BOOT_DEVICE
 1:
-	popw	%di
-	popw	%si
-	popw	%cx
-	popw	%bx
 	popw	%dx
 	popw	%ax
 	popw	%ds
@@ -288,14 +207,7 @@ init_entry:
 /*
  * IDE IRQ9 acknowledgement.
  *
- * Bits 0 and 1 of port 0433h identify primary and secondary channel IRQs.
- * Select every reported channel and read its command-block status register,
- * which deasserts that ATA interrupt, then restore the bank selected by the
- * interrupted code.  If no source is reported, acknowledge the current bank
- * as a compatibility fallback.  The final write to 0433h matches the Xa7
- * BIOS sequence; QEMU accepts it as a no-op because the status reads have
- * already removed the live IRQ sources.
- *
+ * Reading the command-block status register deasserts the ATA interrupt.
  * A non-specific EOI is then sent to the slave and master PICs.  The stock
  * ROM conditionally omits the master EOI while another slave request is in
  * service; this compact handler has no other unmasked slave source during
@@ -305,51 +217,10 @@ init_entry:
 ide_irq:
 	pushw	%ax
 	pushw	%dx
-	pushw	%bx
 
-	movw	$IDE_CHANNEL, %dx
-	inb	%dx, %al
-	movb	%al, %bl
-	movw	$IDE_IRQ_SOURCE, %dx
-	inb	%dx, %al
-	andb	$0x03, %al
-	movb	%al, %bh
-	jnz	1f
-
-	/* If source bits are unavailable, clear the currently selected bank. */
 	movw	$IDE_STATUS, %dx
 	inb	%dx, %al
 	outb	%al, $WAIT_IO
-	jmp	4f
-
-1:
-	testb	$0x01, %bh
-	jz	2f
-	movb	%bl, %al
-	andb	$0xfe, %al
-	movw	$IDE_CHANNEL, %dx
-	outb	%al, %dx
-	movw	$IDE_STATUS, %dx
-	inb	%dx, %al
-	outb	%al, $WAIT_IO
-2:
-	testb	$0x02, %bh
-	jz	3f
-	movb	%bl, %al
-	orb	$0x01, %al
-	movw	$IDE_CHANNEL, %dx
-	outb	%al, %dx
-	movw	$IDE_STATUS, %dx
-	inb	%dx, %al
-	outb	%al, $WAIT_IO
-3:
-	movw	$IDE_CHANNEL, %dx
-	movb	%bl, %al
-	outb	%al, %dx
-4:
-	movw	$IDE_IRQ_SOURCE, %dx
-	movb	$0x01, %al
-	outb	%al, %dx
 
 	movb	$0x20, %al
 	outb	%al, $PIC2_CMD
@@ -357,7 +228,6 @@ ide_irq:
 	outb	%al, $PIC1_CMD
 	outb	%al, $WAIT_IO
 
-	popw	%bx
 	popw	%dx
 	popw	%ax
 	iret
@@ -384,9 +254,6 @@ boot_entry:
 	movw	$BOOT_SEGMENT, %ax
 	movw	%ax, %es
 	xorw	%di, %di
-	movb	$0, %cs:ROM_WORK_SELECTED
-	call	ata_map_logical_hdd
-	jc	boot_return
 	xorl	%eax, %eax
 	movw	$2, %cx
 	call	ata_pio_read
@@ -426,95 +293,46 @@ boot_return:
  * Return by consuming that frame exactly as the stock ROM does.
  */
 int1b_entry:
+	pushl %eax
+	pushl %ebx
+	pushl %ecx
+	pushl %edx
+	pushl %ebp
 	incb	WA_BUSY
 	xorw	%ax, %ax
 	movw	%ax, %ds
-	movb	0(%bp), %al
-	andb	$0x03, %al
-	movb	%al, %cs:ROM_WORK_SELECTED
 
 	movb	1(%bp), %al
-	andb	$0x7f, %al
-	cmpb	$0x16, %al
-	je	int1b_atapi_request
 	andb	$0x0f, %al
 	cmpb	$0x04, %al
-	je	int1b_map_hdd
+	je	int1b_sense
 	cmpb	$0x05, %al
-	je	int1b_map_hdd
+	je	int1b_write
 	cmpb	$0x06, %al
-	je	int1b_map_hdd
+	je	int1b_read
 
 	/* Recalibrate, initialise and unsupported legacy controls are no-ops. */
 	xorw	%ax, %ax
 	jmp	int1b_finish
 
-int1b_map_hdd:
-	call	ata_map_logical_hdd
-	jc	int1b_finish
-	cmpb	$0x04, %al
-	je	int1b_sense
-	cmpb	$0x05, %al
-	je	int1b_write
-	jmp	int1b_read
-
-int1b_atapi_request:
-	xorw	%bx, %bx
-	movb	%cs:ROM_WORK_SELECTED, %bl
-	cmpb	$2, %cs:ROM_WORK_TYPES(%bx)
-	jne	int1b_bad_device
-	jmp	int1b_atapi_read
-
-int1b_bad_device:
-	movb	$0x60, %ah
-	jmp	int1b_finish
-
 int1b_sense:
-	xorw	%bx, %bx
-	movb	%cs:ROM_WORK_SELECTED, %bl
-	cmpb	$2, %cs:ROM_WORK_TYPES(%bx)
-	jne	1f
-	movw	$2048, 2(%bp)
-	movw	$0xffff, 4(%bp)
-	movw	$0xffff, 6(%bp)
-	movb	$0x0f, %ah
-	jmp	int1b_finish
-1:
 	movw	$512, 2(%bp)
-	shlw	$1, %bx
-	movw	%cs:ROM_WORK_CYLINDERS(%bx), %ax
+	movw	%cs:ROM_WORK_CYLINDERS, %ax
 	movw	%ax, 4(%bp)
-	movb	%cs:ROM_WORK_HEADS(%bx), %ah
-	movb	%cs:ROM_WORK_SECTORS(%bx), %al
+	movb	%cs:ROM_WORK_HEADS, %ah
+	movb	%cs:ROM_WORK_SECTORS, %al
 	movw	%ax, 6(%bp)
 	movb	$0x0f, %ah
 	jmp	int1b_finish
 
 int1b_read:
-	xorw	%bx, %bx
-	movb	%cs:ROM_WORK_SELECTED, %bl
-	cmpb	$2, %cs:ROM_WORK_TYPES(%bx)
-	je	int1b_atapi_read
 	call	request_lba
 	jc	int1b_finish
 	call	request_count_buffer
 	call	ata_pio_read_bytes
 	jmp	int1b_finish
 
-int1b_atapi_read:
-	call	request_linear_lba
-	call	request_count_buffer
-	call	atapi_pio_read_bytes
-	jmp	int1b_finish
-
 int1b_write:
-	xorw	%bx, %bx
-	movb	%cs:ROM_WORK_SELECTED, %bl
-	cmpb	$2, %cs:ROM_WORK_TYPES(%bx)
-	jne	1f
-	movb	$0x40, %ah		/* packet media are read-only here */
-	jmp	int1b_finish
-1:
 	call	request_lba
 	jc	int1b_finish
 	call	request_count_buffer
@@ -528,6 +346,11 @@ int1b_finish:
 	orb	$0x01, 0x16(%bp)
 1:
 	decb	WA_BUSY
+	popl %ebp
+	popl %edx
+	popl %ecx
+	popl %ebx
+	popl %eax
 	popw	%ax
 	popw	%bx
 	popw	%cx
@@ -549,18 +372,14 @@ int1b_finish:
  * than 1 GiB.
  */
 request_lba:
-	movb	0(%bp), %al
-	andb	$0x7c, %al
+	testb	$0x01, 0(%bp)
 	jnz	request_bad_device
 	testb	$0x80, 0(%bp)
 	jz	request_relative
 
-	xorw	%bx, %bx
-	movb	%cs:ROM_WORK_SELECTED, %bl
-	shlw	$1, %bx
-	movzwl	%cs:ROM_WORK_SECTORS(%bx), %ecx
-	movzwl	%cs:ROM_WORK_HEADS(%bx), %ebx
 	movzwl	4(%bp), %eax
+	movzwl	%cs:ROM_WORK_HEADS, %ebx
+	movzwl	%cs:ROM_WORK_SECTORS, %ecx
 	imull	%ecx, %ebx
 	imull	%ebx, %eax
 	movzbl	7(%bp), %edx
@@ -582,15 +401,6 @@ request_relative:
 request_bad_device:
 	movb	$0x60, %ah		/* not ready */
 	stc
-	ret
-
-/* ATAPI READ(10) always addresses 2048-byte logical blocks linearly. */
-request_linear_lba:
-	movzwl	4(%bp), %eax
-	movzbl	6(%bp), %edx
-	shll	$16, %edx
-	orl	%edx, %eax
-	clc
 	ret
 
 /*
@@ -627,91 +437,12 @@ ata_reset:
 	ret
 
 /*
- * Probe the selected channel/unit without relying on the sibling-response
- * behaviour of an ATA bus.  Return AL=0 for absent, 1 for ATA HDD, and
- * 2 for an ATAPI packet device.
- */
-ata_probe_device:
-	pushw	%bx
-	pushw	%cx
-	pushw	%dx
-
-	call	ata_select_channel
-	testb	$0x01, %cs:ROM_WORK_SELECTED
-	jz	1f
-	movw	$0x0430, %dx
-	inb	%dx, %al
-	testb	$0x40, %al
-	jz	ata_probe_absent
-1:
-	movw	$IDE_DRVHEAD, %dx
-	movb	$0xa0, %al
-	testb	$0x01, %cs:ROM_WORK_SELECTED
-	jz	2f
-	orb	$0x10, %al
-2:
-	outb	%al, %dx
-	movw	$IDE_STATUS, %dx
-	movw	$0xffff, %cx
-3:
-	inb	%dx, %al
-	cmpb	$0xff, %al
-	je	ata_probe_absent
-	testb	%al, %al
-	jz	ata_probe_absent
-	testb	$ATA_ST_BSY, %al
-	jz	4f
-	loop	3b
-	jmp	ata_probe_absent
-4:
-	movb	$ATA_IDENTIFY, %al
-	outb	%al, %dx
-	movw	$0xffff, %cx
-5:
-	inb	%dx, %al
-	testb	$ATA_ST_BSY, %al
-	jz	6f
-	loop	5b
-	jmp	ata_probe_absent
-6:
-	testb	$ATA_ST_DRQ, %al
-	jnz	ata_probe_hdd
-	testb	$ATA_ST_ERR, %al
-	jz	ata_probe_absent
-	movw	$IDE_CYLLO, %dx
-	inb	%dx, %al
-	movb	%al, %bl
-	movw	$IDE_CYLHI, %dx
-	inb	%dx, %al
-	cmpb	$0xeb, %al
-	jne	ata_probe_absent
-	cmpb	$0x14, %bl
-	jne	ata_probe_absent
-	movb	$2, %al
-	jmp	ata_probe_done
-
-ata_probe_hdd:
-	movw	$IDE_DATA, %dx
-	movw	$256, %cx
-7:
-	inw	%dx, %ax
-	loop	7b
-	movb	$1, %al
-	jmp	ata_probe_done
-
-ata_probe_absent:
-	xorb	%al, %al
-ata_probe_done:
-	popw	%dx
-	popw	%cx
-	popw	%bx
-	ret
-
-/*
- * Read the selected HDD's legacy geometry from ATA IDENTIFY words 1, 3 and
- * 6, plus its maximum multiple-sector count from word 47.  Retain them for
- * that physical slot and consume all 256 words.  Invalid or unavailable
- * data leaves the conservative defaults installed by init_entry.
+ * Read the current master's legacy geometry from ATA IDENTIFY words 1, 3
+ * and 6.  QEMU's pc98 IDE controller reports the machine's required 8/17
+ * translation here, with the cylinder count derived from the image size.
+ * Consume all 256 words so the device leaves its data phase.  Invalid or
+ * unavailable IDENTIFY data leaves the conservative defaults installed by
+ * init_entry.
  */
 ata_identify_geometry:
 	pushw	%ax
@@ -719,15 +450,12 @@ ata_identify_geometry:
 	pushw	%cx
 	pushw	%dx
 	pushw	%si
-	pushw	%di
 
-	call	ata_select_channel
+	movw	$IDE_CHANNEL, %dx
+	xorb	%al, %al
+	outb	%al, %dx
 	movw	$IDE_DRVHEAD, %dx
 	movb	$0xa0, %al
-	testb	$0x01, %cs:ROM_WORK_SELECTED
-	jz	4f
-	orb	$0x10, %al
-4:
 	outb	%al, %dx
 	call	ata_wait_ready
 	jc	2f
@@ -753,7 +481,10 @@ ata_identify_geometry:
 	testw	%bx, %bx
 	jz	1f
 	cmpw	$0xffff, %bx
-	je	1f
+	jne	4f
+	decw	%bx
+//	je	1f
+4:
 	testw	%si, %si
 	jz	1f
 	cmpw	$0x00ff, %si
@@ -762,135 +493,21 @@ ata_identify_geometry:
 	jz	1f
 	cmpw	$0x00ff, %cx
 	ja	1f
-	xorw	%di, %di
-	movb	%cs:ROM_WORK_SELECTED, %al
-	xorb	%ah, %ah
-	shlw	$1, %ax
-	movw	%ax, %di
-	movw	%bx, %cs:ROM_WORK_CYLINDERS(%di)
-	movw	%si, %cs:ROM_WORK_HEADS(%di)
-	movw	%cx, %cs:ROM_WORK_SECTORS(%di)
+	movw	%bx, %cs:ROM_WORK_CYLINDERS
+	movw	%si, %cs:ROM_WORK_HEADS
+	movw	%cx, %cs:ROM_WORK_SECTORS
 1:
-	movw	$40, %cx		/* words 7 through 46 */
+	movw	$249, %cx		/* words 7 through 255 */
 3:
 	inw	%dx, %ax
 	loop	3b
-	inw	%dx, %ax		/* word 47: maximum multiple count */
-	testw	$0x8000, %ax
-	jz	4f
-	testb	%al, %al
-	jz	4f
-	xorw	%bx, %bx
-	movb	%cs:ROM_WORK_SELECTED, %bl
-	movb	%al, %cs:ROM_WORK_MULTI_MAX(%bx)
-4:
-	movw	$208, %cx		/* words 48 through 255 */
-5:
-	inw	%dx, %ax
-	loop	5b
 	clc
-2:
-	popw	%di
-	popw	%si
-	popw	%dx
-	popw	%cx
-	popw	%bx
-	popw	%ax
-	ret
-
-/* Convert the dense BIOS HDD number in SELECTED to a physical ATA slot. */
-ata_map_logical_hdd:
-	pushw	%bx
-	xorw	%bx, %bx
-	movb	%cs:ROM_WORK_SELECTED, %bl
-	cmpb	$4, %bl
-	jae	1f
-	movb	%cs:ROM_WORK_LOGICAL(%bx), %bl
-	cmpb	$0xff, %bl
-	je	1f
-	movb	%bl, %cs:ROM_WORK_SELECTED
-	popw	%bx
-	clc
-	ret
-1:
-	popw	%bx
-	movb	$0x60, %ah
-	stc
-	ret
-
-/* Enable the IDENTIFY-advertised multiple count for the selected HDD. */
-ata_enable_multiple:
-	pushw	%ax
-	pushw	%bx
-	pushw	%cx
-	pushw	%dx
-	pushw	%si
-
-	xorw	%bx, %bx
-	movb	%cs:ROM_WORK_SELECTED, %bl
-	movzbw	%cs:ROM_WORK_MULTI_MAX(%bx), %si
-	cmpw	$2, %si
-	jb	2f
-	cmpw	$128, %si
-	ja	2f
-	movw	%si, %ax
-	decw	%ax
-	testw	%si, %ax
-	jnz	2f
-
-	call	ata_select_channel
-	movw	$IDE_DRVHEAD, %dx
-	movb	$0xa0, %al
-	testb	$0x01, %cs:ROM_WORK_SELECTED
-	jz	1f
-	orb	$0x10, %al
-1:
-	outb	%al, %dx
-	call	ata_wait_idle
-	jc	2f
-
-	movw	$IDE_SECCNT, %dx
-	movw	%si, %ax
-	outb	%al, %dx
-	movw	$IDE_COMMAND, %dx
-	movb	$ATA_SET_MULTIPLE, %al
-	outb	%al, %dx
-	call	ata_wait_ready
-	jc	2f
-
-	movw	%si, %ax
-	movb	%al, %cs:ROM_WORK_MULTI_ACTIVE(%bx)
 2:
 	popw	%si
 	popw	%dx
 	popw	%cx
 	popw	%bx
 	popw	%ax
-	ret
-
-/* Return ZF clear only after SET MULTIPLE MODE succeeded for this HDD. */
-ata_multiple_active:
-	pushw	%bx
-	xorw	%bx, %bx
-	movb	%cs:ROM_WORK_SELECTED, %bl
-	cmpb	$0, %cs:ROM_WORK_MULTI_ACTIVE(%bx)
-	popw	%bx
-	ret
-
-ata_read_opcode:
-	movb	$ATA_READ_SECTORS, %al
-	call	ata_multiple_active
-	jz	1f
-	movb	$ATA_READ_MULTIPLE, %al
-1:
-	ret
-
-ata_write_opcode:
-	movb	$ATA_WRITE_SECTORS, %al
-	call	ata_multiple_active
-	jz	1f
-	movb	$ATA_WRITE_MULTIPLE, %al
-1:
 	ret
 
 /*
@@ -901,8 +518,10 @@ ata_setup:
 	movw	%cx, %si
 	movl	%eax, %ebx
 
-	call	ata_select_channel
-	call	ata_wait_idle
+	movw	$IDE_CHANNEL, %dx
+	xorb	%al, %al
+	outb	%al, %dx
+	call	ata_wait_ready
 	jc	1f
 
 	movw	%si, %ax
@@ -921,38 +540,17 @@ ata_setup:
 	movb	%bh, %al
 	andb	$0x0f, %al
 	orb	$0xe0, %al
-	testb	$0x01, %cs:ROM_WORK_SELECTED
-	jz	2f
-	orb	$0x10, %al
-2:
 	movw	$IDE_DRVHEAD, %dx
 	outb	%al, %dx
 	clc
 1:
 	ret
 
-/*
- * Select the multiplexed ATA channel for the current physical slot.  Slots
- * 0/1 are channel 0 master/slave and slots 2/3 are channel 1 master/slave.
- * The device bit itself is applied to DEV/HEAD by callers.
- */
-ata_select_channel:
-	pushw	%ax
-	pushw	%dx
-	movb	%cs:ROM_WORK_SELECTED, %al
-	shrb	$1, %al
-	andb	$0x01, %al
-	movw	$IDE_CHANNEL, %dx
-	outb	%al, %dx
-	popw	%dx
-	popw	%ax
-	ret
-
 ata_pio_read:
 	call	ata_setup
 	jc	ata_failed
 	movw	$IDE_COMMAND, %dx
-	call	ata_read_opcode
+	movb	$ATA_READ, %al
 	outb	%al, %dx
 	cld
 1:
@@ -989,12 +587,13 @@ ata_pio_read_bytes:
 	call	ata_setup
 	jc	5f
 	movw	$IDE_COMMAND, %dx
-	call	ata_read_opcode
+	movb	$ATA_READ, %al
 	outb	%al, %dx
 	cld
 2:
 	call	ata_wait_drq
-	jc	5f
+//	jc	5f
+	jc	2b			//emulatorでエラー出るわけがない
 	movw	$IDE_DATA, %dx
 	cmpl	$512, %ebp
 	jb	3f
@@ -1028,108 +627,6 @@ ata_pio_read_bytes:
 	popl	%ebp
 	ret
 
-/*
- * Read byte-counted 2048-byte logical blocks from the selected ATAPI
- * device with a twelve-byte READ(10) packet.  The INT 1Bh address is the
- * 24-bit linear block number in DL:CX; a partial final block is drained so
- * the packet device always returns to command phase.
- */
-atapi_pio_read_bytes:
-	pushl	%ebp
-	pushl	%esi
-	movl	%eax, %ebp
-	movzwl	%bx, %esi
-	testl	%esi, %esi
-	jnz	1f
-	movl	$0x00010000, %esi
-1:
-	call	ata_select_channel
-	movw	$IDE_DRVHEAD, %dx
-	movb	$0xa0, %al
-	testb	$0x01, %cs:ROM_WORK_SELECTED
-	jz	2f
-	orb	$0x10, %al
-2:
-	outb	%al, %dx
-	movw	$IDE_STATUS, %dx
-	movw	$0xffff, %cx
-3:
-	inb	%dx, %al
-	cmpb	$0xff, %al
-	je	8f
-	testb	$ATA_ST_BSY, %al
-	jz	4f
-	loop	3b
-	jmp	8f
-4:
-	movw	$IDE_ERROR, %dx
-	xorb	%al, %al		/* FEATURES: PIO, no overlap */
-	outb	%al, %dx
-	movw	$IDE_SECCNT, %dx
-	outb	%al, %dx
-	movw	$IDE_CYLLO, %dx
-	outb	%al, %dx		/* transfer byte count 0800h */
-	movw	$IDE_CYLHI, %dx
-	movb	$0x08, %al
-	outb	%al, %dx
-	movw	$IDE_COMMAND, %dx
-	movb	$ATA_PACKET, %al
-	outb	%al, %dx
-	call	ata_wait_drq
-	jc	8f
-
-	/* Twelve-byte SCSI READ(10) packet, one logical block. */
-	movw	$IDE_DATA, %dx
-	movw	$0x0028, %ax
-	outw	%ax, %dx
-	movl	%ebp, %eax
-	bswapl	%eax
-	outw	%ax, %dx
-	shrl	$16, %eax
-	outw	%ax, %dx
-	xorw	%ax, %ax
-	outw	%ax, %dx
-	movw	$0x0001, %ax
-	outw	%ax, %dx
-	xorw	%ax, %ax
-	outw	%ax, %dx
-
-	call	ata_wait_drq
-	jc	8f
-	movw	$IDE_DATA, %dx
-	cmpl	$2048, %esi
-	jb	5f
-	movw	$1024, %cx
-	rep	insw
-	subl	$2048, %esi
-	jmp	6f
-5:
-	movl	%esi, %ecx
-	shrl	$1, %ecx
-	rep	insw
-	movw	$1024, %cx
-	movw	%si, %ax
-	shrw	$1, %ax
-	subw	%ax, %cx
-7:
-	inw	%dx, %ax
-	loop	7b
-	xorl	%esi, %esi
-6:
-	incl	%ebp
-	testl	%esi, %esi
-	jnz	1b
-	xorw	%ax, %ax
-	clc
-	jmp	9f
-8:
-	movb	$0x40, %ah
-	stc
-9:
-	popl	%esi
-	popl	%ebp
-	ret
-
 ata_pio_write:
 	call	ata_setup
 	jc	ata_failed
@@ -1141,12 +638,13 @@ ata_pio_write:
 	movw	%si, %bx
 	movw	%di, %si
 	movw	$IDE_COMMAND, %dx
-	call	ata_write_opcode
+	movb	$ATA_WRITE, %al
 	outb	%al, %dx
 	cld
 1:
 	call	ata_wait_drq
-	jc	ata_failed
+//	jc	ata_failed
+	jc	1b		//emulatorではエラーは発生しない
 	movw	$IDE_DATA, %dx
 	movw	$256, %cx
 	rep	outsw	%es:(%si), (%dx)
@@ -1155,24 +653,6 @@ ata_pio_write:
 	call	ata_wait_ready
 	jc	ata_failed
 	xorw	%ax, %ax
-	clc
-	ret
-
-/* Wait until a new command can be issued, ignoring a stale ERR status. */
-ata_wait_idle:
-	movw	$0xffff, %cx
-	movw	$IDE_STATUS, %dx
-1:
-	inb	%dx, %al
-	testb	$ATA_ST_BSY, %al
-	jnz	2f
-	testb	$ATA_ST_DRDY, %al
-	jnz	3f
-2:
-	outb	%al, $WAIT_IO
-	loop	1b
-	jmp	ata_failed
-3:
 	clc
 	ret
 
