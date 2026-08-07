@@ -166,11 +166,11 @@ install_entry:
  * immediately after this call, before a second reset could settle.
  */
 init_entry:
-	pushl %eax
-	pushl %ebx
-	pushl %ecx
-	pushl %edx
-	pushl %ebp
+	pushl	%eax
+	pushl	%ebx
+	pushl	%ecx
+	pushl	%edx
+	pushl	%ebp
 
 	pushw	%ds
 	pushw	%ax
@@ -282,11 +282,6 @@ init_entry:
 	orb	$0x80, WA_DISK_FLAGS
 	movb	$0x80, WA_BOOT_DEVICE
 1:
-	popl %ebp
-	popl %edx
-	popl %ecx
-	popl %ebx
-	popl %eax
 	popw	%di
 	popw	%si
 	popw	%cx
@@ -294,6 +289,11 @@ init_entry:
 	popw	%dx
 	popw	%ax
 	popw	%ds
+	popl	%ebp
+	popl	%edx
+	popl	%ecx
+	popl	%ebx
+	popl	%eax
 	lret
 
 /*
