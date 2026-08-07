@@ -166,11 +166,6 @@ install_entry:
  * immediately after this call, before a second reset could settle.
  */
 init_entry:
-	pushl	%eax
-	pushl	%ebx
-	pushl	%ecx
-	pushl	%edx
-
 	pushw	%ds
 	pushw	%ax
 	pushw	%dx
@@ -288,10 +283,6 @@ init_entry:
 	popw	%dx
 	popw	%ax
 	popw	%ds
-	popl	%edx
-	popl	%ecx
-	popl	%ebx
-	popl	%eax
 	lret
 
 /*
@@ -435,6 +426,10 @@ boot_return:
  * Return by consuming that frame exactly as the stock ROM does.
  */
 int1b_entry:
+	pushl	%eax
+	pushl	%ebx
+	pushl	%ecx
+	pushl	%edx
 	incb	WA_BUSY
 	xorw	%ax, %ax
 	movw	%ax, %ds
@@ -537,6 +532,10 @@ int1b_finish:
 	orb	$0x01, 0x16(%bp)
 1:
 	decb	WA_BUSY
+	popl	%edx
+	popl	%ecx
+	popl	%ebx
+	popl	%eax
 	popw	%ax
 	popw	%bx
 	popw	%cx
