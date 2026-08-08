@@ -440,8 +440,8 @@ static void pc98_ide_pre_plug(HotplugHandler *hotplug_dev,
 {
     IDEDevice *ide;
     int64_t bytes;
-    uint64_t sectors, cylinders;
-    uint32_t cyls;
+//    uint64_t sectors, cylinders;
+//    uint32_t cyls;
 
     if (!object_dynamic_cast(OBJECT(dev), "ide-hd")) {
         return;
@@ -459,7 +459,7 @@ static void pc98_ide_pre_plug(HotplugHandler *hotplug_dev,
                          "Could not determine PC-98 IDE disk size");
         return;
     }
-
+#if 0
     sectors = bytes / BDRV_SECTOR_SIZE;
     cylinders = sectors / (PC98_IDE_HEADS * PC98_IDE_SECTORS);
     if (cylinders < 1) {
@@ -478,6 +478,7 @@ static void pc98_ide_pre_plug(HotplugHandler *hotplug_dev,
     ide->conf.cyls = cyls;
     ide->conf.heads = PC98_IDE_HEADS;
     ide->conf.secs = PC98_IDE_SECTORS;
+#endif
 }
 
 static void pc98_ide_realize(DeviceState *dev, Error **errp)
