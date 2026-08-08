@@ -1185,6 +1185,17 @@ keyboard_buffer_make:
 	movzbl	%ah, %ebx
 	movb	%cs:(ascii_table - FD80_FILE_BASE)(%bx), %al
 1:
+	/* Apply the Shift state while the make code is handled.  AH=09h already
+	 * performs this conversion, but the normal IRQ queue path historically
+	 * omitted it and therefore returned Shift+A as lowercase 'a'. */
+	testb	$0x01, KB_SHIFT
+	jz	keyboard_shift_ascii_done
+	cmpb	$'a', %al
+	jb	keyboard_shift_ascii_done
+	cmpb	$'z', %al
+	ja	keyboard_shift_ascii_done
+	subb	$('a' - 'A'), %al
+keyboard_shift_ascii_done:
 	/*
 	 * The direct key-state byte uses bit 4 for CTRL (scan code 74h).
 	 * DOS consumes the ASCII byte from this BIOS queue, rather than
