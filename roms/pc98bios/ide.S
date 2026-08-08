@@ -43,6 +43,7 @@
 	.equ	ATA_ST_DRQ,	0x08
 	.equ	ATA_ST_DRDY,	0x40
 	.equ	ATA_ST_BSY,	0x80
+	.equ	ATA_SPECIFY,	0x91
 
 	.equ	WA_BUSY,	0x0456
 	.equ	WA_GEOMETRY,	0x0457
@@ -738,13 +739,15 @@ ata_identify_geometry:
 4:
 	outb	%al, %dx
 	call	ata_wait_ready
-	jc	2f
-
+//	jc	2f
+	jc	4b
+5:
 	movw	$IDE_COMMAND, %dx
 	movb	$ATA_IDENTIFY, %al
 	outb	%al, %dx
 	call	ata_wait_drq
-	jc	2f
+//	jc	2f
+	jc	5b
 
 	movw	$IDE_DATA, %dx
 	inw	%dx, %ax		/* word 0: configuration */
@@ -760,10 +763,92 @@ ata_identify_geometry:
 
 	testw	%bx, %bx
 	jz	1f
+
+	pushl	%eax
+	pushl	%ebx
+	pushl	%ecx
+	pushl	%edx
+//BX:C CX:S SI:H
+	movzxw	%si,%eax
+	movzxw	%cx,%edx
+	mull	%edx		//%eax == 0x3f0
+	movzxw	%bx,%ecx
+	mull	%ecx		
+	cmpl	$0,%edx
+	jne	7f		//2TB越えは2TBに変更
+	cmpl	$0x880000,%eax	//8*17*65536
+	ja	7f		//4351MiB越えはnative値でそのまま
+
+8:
+	movw	$IDE_DATA, %dx
+	inw	%dx, %ax
+	movw	$IDE_STATUS,%dx
+	inb	%dx, %al
+	testb	$0x8,%al
+	jnz	8b
+
+	movl	%eax,%ecx
+	mov	$IDE_DRVHEAD,%dx
+	inb	%dx,%al
+	and	$0x10,%al
+	or	$7,%al
+	outb	%al,%dx
+	mov	$IDE_SECCNT,%dx
+	mov	$0x11,%al
+	outb	%al,%dx
+	movw	$IDE_COMMAND, %dx
+	movb	$ATA_SPECIFY, %al
+	outb	%al, %dx
+	movl	$0x88,%eax
+	xchg	%eax,%ecx
+	xorl	%edx,%edx
+	divl	%ecx
+
+	movw	%ax,%si
+	popl	%edx
+	popl	%ecx
+	popl	%ebx
+	popl	%eax
+	mov	%si,%bx
+	inc	%bx
+	dec	%bx
+	jnc	8f
+	dec	%bx
+8:
+	movw	$17,%cx
+	movw	$8,%si
+
+5:
+	movw	$IDE_COMMAND, %dx
+	movb	$ATA_IDENTIFY, %al
+	outb	%al, %dx
+	call	ata_wait_drq
+	jc	5b
+
+	movw	$IDE_DATA, %dx
+	movw	$7, %cx		/* words 0 through 6 */
+3:
+	inw	%dx, %ax
+	loop	3b
+	jmp	6f
+
+7:
+	popl	%edx
+	popl	%ecx
+	popl	%ebx
+	popl	%eax
+	ja	6f
+	movw	$255,%si
+	movw	$255,%cx
+	movw	$65534,%bx
+	jmp	6f
+
+#if 0
 	cmpw	$0xffff, %bx
 //	je	1f
 	jne	6f
 	decw	%bx
+#endif
 6:
 	testw	%si, %si
 	jz	1f
