@@ -31,6 +31,14 @@
  */
 void cpu_load_eflags(CPUX86State *env, int eflags, int update_mask)
 {
+    /*
+     * AC and ID were added after the 80386.  Keep their reserved bits fixed
+     * instead of allowing PUSHFD/POPFD probes to misidentify this model.
+     */
+    if (x86_cpu_family(env->cpuid_version) < 4) {
+        update_mask &= ~(AC_MASK | ID_MASK);
+    }
+
     CC_SRC = eflags & (CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
     CC_OP = CC_OP_EFLAGS;
     env->df = 1 - (2 * ((eflags >> 10) & 1));

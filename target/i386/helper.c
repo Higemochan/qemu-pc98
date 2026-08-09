@@ -138,6 +138,17 @@ void cpu_x86_update_cr0(CPUX86State *env, uint32_t new_cr0)
     X86CPU *cpu = env_archcpu(env);
     int pe_state;
 
+    /*
+     * On 80386, the cache-control, alignment-mask, not-write-through and
+     * write-protect bits are reserved.  In particular, accepting CR0.WP
+     * would give the kernel 486 write-protection semantics and conceal the
+     * software workaround which CONFIG_M386 must exercise.
+     */
+    if (x86_cpu_family(env->cpuid_version) < 4) {
+        new_cr0 &= CR0_PG_MASK | CR0_ET_MASK | CR0_TS_MASK |
+                   CR0_EM_MASK | CR0_MP_MASK | CR0_PE_MASK;
+    }
+
     qemu_log_mask(CPU_LOG_MMU, "CR0 update: CR0=0x%08x\n", new_cr0);
     if ((new_cr0 & (CR0_PG_MASK | CR0_WP_MASK | CR0_PE_MASK)) !=
         (env->cr[0] & (CR0_PG_MASK | CR0_WP_MASK | CR0_PE_MASK))) {

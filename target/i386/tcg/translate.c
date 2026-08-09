@@ -104,6 +104,7 @@ typedef struct DisasContext {
 #endif
     uint8_t vex_l;  /* vex vector length */
     uint8_t vex_v;  /* vex vvvv register, without 1's complement.  */
+    uint8_t cpu_family;
     uint8_t popl_esp_hack; /* for correct popl with esp base handling */
     uint8_t rip_offset; /* only used in x86_64, but left for simplicity */
 
@@ -3114,6 +3115,9 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             break;
 
         CASE_MODRM_MEM_OP(7): /* invlpg */
+            if (s->cpu_family < 4) {
+                goto illegal_op;
+            }
             if (!check_cpl0(s)) {
                 break;
             }
@@ -3469,6 +3473,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->cc_op_dirty = false;
     /* select memory access functions */
     dc->mem_index = cpu_mmu_index(cpu, false);
+    dc->cpu_family = x86_cpu_family(env->cpuid_version);
     dc->cpuid_features = env->features[FEAT_1_EDX];
     dc->cpuid_ext_features = env->features[FEAT_1_ECX];
     dc->cpuid_ext2_features = env->features[FEAT_8000_0001_EDX];

@@ -1284,10 +1284,10 @@ static const X86OpEntry opcodes_0F[256] = {
     [0x22] = X86_OP_GROUPwr(MOV_CR_DR,   C,y_d64, R,y_d64, zextT0 chk(cpl0) svm(WRITE_CR0)),
     [0x23] = X86_OP_GROUPwr(MOV_CR_DR,   D,y_d64, R,y_d64, zextT0 chk(cpl0) svm(WRITE_DR0)),
 
-    [0x30] = X86_OP_ENTRY0(WRMSR,                             chk(cpl0)),
-    [0x31] = X86_OP_ENTRY0(RDTSC),
-    [0x32] = X86_OP_ENTRY0(RDMSR,                             chk(cpl0)),
-    [0x33] = X86_OP_ENTRY0(RDPMC),
+    [0x30] = X86_OP_ENTRY0(WRMSR,                             chk(cpl0) cpuid(I586)),
+    [0x31] = X86_OP_ENTRY0(RDTSC,                             cpuid(I586)),
+    [0x32] = X86_OP_ENTRY0(RDMSR,                             chk(cpl0) cpuid(I586)),
+    [0x33] = X86_OP_ENTRY0(RDPMC,                             cpuid(I686)),
     [0x34] = X86_OP_ENTRY0(SYSENTER,                          chk2(i64_amd, prot_or_vm86)),
     [0x35] = X86_OP_ENTRY0(SYSEXIT,                           chk3(i64_amd, prot, cpl0)),
 
@@ -1347,13 +1347,13 @@ static const X86OpEntry opcodes_0F[256] = {
 
     [0xa0] = X86_OP_ENTRYr(PUSH, FS, w),
     [0xa1] = X86_OP_ENTRYw(POP, FS, w),
-    [0xa2] = X86_OP_ENTRY0(CPUID),
+    [0xa2] = X86_OP_ENTRY0(CPUID,                             cpuid(I486)),
     [0xa3] = X86_OP_ENTRYrr(BT,   E,v, G,v,          btEvGv),
     [0xa4] = X86_OP_ENTRY4(SHLD,  E,v, 2op,v, G,v),
     [0xa5] = X86_OP_ENTRY3(SHLD,  E,v, 2op,v, G,v),
 
-    [0xb0] = X86_OP_ENTRY2(CMPXCHG,E,b, G,b, lock),
-    [0xb1] = X86_OP_ENTRY2(CMPXCHG,E,v, G,v, lock),
+    [0xb0] = X86_OP_ENTRY2(CMPXCHG,E,b, G,b, lock cpuid(I486)),
+    [0xb1] = X86_OP_ENTRY2(CMPXCHG,E,v, G,v, lock cpuid(I486)),
     [0xb2] = X86_OP_ENTRY3(LSS,    G,v, EM,p, None, None),
     [0xb3] = X86_OP_ENTRY2(BTR,    E,v, G,v,             btEvGv),
     [0xb4] = X86_OP_ENTRY3(LFS,    G,v, EM,p, None, None),
@@ -1361,8 +1361,8 @@ static const X86OpEntry opcodes_0F[256] = {
     [0xb6] = X86_OP_ENTRY3(MOV,    G,v, E,b, None, None, zextT0), /* MOVZX */
     [0xb7] = X86_OP_ENTRY3(MOV,    G,v, E,w, None, None, zextT0), /* MOVZX */
 
-    [0xc0] = X86_OP_ENTRY2(XADD,       E,b, G,b,            lock),
-    [0xc1] = X86_OP_ENTRY2(XADD,       E,v, G,v,            lock),
+    [0xc0] = X86_OP_ENTRY2(XADD,       E,b, G,b,            lock cpuid(I486)),
+    [0xc1] = X86_OP_ENTRY2(XADD,       E,v, G,v,            lock cpuid(I486)),
     [0xc2] = X86_OP_ENTRY4(VCMP,       V,x, H,x, W,x,       vex2_rep3 p_00_66_f3_f2),
     [0xc3] = X86_OP_ENTRY3(MOV,        EM,y,G,y, None,None, cpuid(SSE2)), /* MOVNTI */
     [0xc4] = X86_OP_ENTRY4(PINSRW,     V,dq,H,dq,E,w,       vex5 mmx p_00_66),
@@ -1397,8 +1397,8 @@ static const X86OpEntry opcodes_0F[256] = {
     [0xf6] = X86_OP_ENTRY3(PSADBW,   V,x, H,x, W,x,         vex4 mmx avx2_256 p_00_66),
     [0xf7] = X86_OP_ENTRY3(MASKMOV,  None,None, V,dq, U,dq, vex4_unal avx2_256 mmx p_00_66),
 
-    [0x08] = X86_OP_ENTRY0(NOP,           svm(INVD)),
-    [0x09] = X86_OP_ENTRY0(NOP,           svm(WBINVD)),
+    [0x08] = X86_OP_ENTRY0(NOP,           svm(INVD) cpuid(I486)),
+    [0x09] = X86_OP_ENTRY0(NOP,           svm(WBINVD) cpuid(I486)),
     [0x0b] = X86_OP_ENTRY0(UD),           /* UD2 */
     [0x0d] = X86_OP_ENTRY1(NOP,  M,v),    /* 3DNow! prefetch */
     [0x0e] = X86_OP_ENTRY0(EMMS,                              cpuid(3DNOW)), /* femms */
@@ -1505,14 +1505,14 @@ static const X86OpEntry opcodes_0F[256] = {
     [0xbe] = X86_OP_ENTRY3(MOV,    G,v, E,b, None, None, sextT0), /* MOVSX */
     [0xbf] = X86_OP_ENTRY3(MOV,    G,v, E,w, None, None, sextT0), /* MOVSX */
 
-    [0xc8] = X86_OP_ENTRY1(BSWAP,     LoBits,y),
-    [0xc9] = X86_OP_ENTRY1(BSWAP,     LoBits,y),
-    [0xca] = X86_OP_ENTRY1(BSWAP,     LoBits,y),
-    [0xcb] = X86_OP_ENTRY1(BSWAP,     LoBits,y),
-    [0xcc] = X86_OP_ENTRY1(BSWAP,     LoBits,y),
-    [0xcd] = X86_OP_ENTRY1(BSWAP,     LoBits,y),
-    [0xce] = X86_OP_ENTRY1(BSWAP,     LoBits,y),
-    [0xcf] = X86_OP_ENTRY1(BSWAP,     LoBits,y),
+    [0xc8] = X86_OP_ENTRY1(BSWAP,     LoBits,y, cpuid(I486)),
+    [0xc9] = X86_OP_ENTRY1(BSWAP,     LoBits,y, cpuid(I486)),
+    [0xca] = X86_OP_ENTRY1(BSWAP,     LoBits,y, cpuid(I486)),
+    [0xcb] = X86_OP_ENTRY1(BSWAP,     LoBits,y, cpuid(I486)),
+    [0xcc] = X86_OP_ENTRY1(BSWAP,     LoBits,y, cpuid(I486)),
+    [0xcd] = X86_OP_ENTRY1(BSWAP,     LoBits,y, cpuid(I486)),
+    [0xce] = X86_OP_ENTRY1(BSWAP,     LoBits,y, cpuid(I486)),
+    [0xcf] = X86_OP_ENTRY1(BSWAP,     LoBits,y, cpuid(I486)),
 
     /* Incorrectly missing from 2-17 */
     [0xd8] = X86_OP_ENTRY3(PSUBUSB,  V,x, H,x, W,x,  vex4 mmx avx2_256 p_00_66),
@@ -2512,6 +2512,12 @@ static bool has_cpuid_feature(DisasContext *s, X86CPUIDFeature cpuid)
     switch (cpuid) {
     case X86_FEAT_None:
         return true;
+    case X86_FEAT_I486:
+        return s->cpu_family >= 4;
+    case X86_FEAT_I586:
+        return s->cpu_family >= 5;
+    case X86_FEAT_I686:
+        return s->cpu_family >= 6;
     case X86_FEAT_CMOV:
         return (s->cpuid_features & CPUID_CMOV);
     case X86_FEAT_CLFLUSH:
@@ -2947,6 +2953,22 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
     }
     if (!decode.e.gen) {
         goto unknown_op;
+    }
+
+    /*
+     * CR4 did not exist on the 386.  Keep every existing QEMU CPU model
+     * unchanged: in particular, QEMU's legacy "486" model has historically
+     * accepted CR4 and current Linux decompression code relies on that
+     * compatibility behaviour before installing an exception table.
+     *
+     * The register number is encoded as an operand, so reject it after
+     * decoding but before loading operands or performing side effects.
+     */
+    for (int i = 0; i < ARRAY_SIZE(decode.op); i++) {
+        if (decode.op[i].unit == X86_OP_CR && decode.op[i].n == 4 &&
+            s->cpu_family < 4) {
+            goto illegal_op;
+        }
     }
 
     if (!has_cpuid_feature(s, decode.e.cpuid)) {
