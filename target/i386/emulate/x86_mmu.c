@@ -286,10 +286,33 @@ static MMUTranslateResult x86_write_mem_ex(CPUState *cpu, void *data, target_ulo
         mem_tx_res = address_space_write(&address_space_memory, gpa,
                             MEMTXATTRS_UNSPECIFIED, data, copy);
 
-        if (mem_tx_res == MEMTX_DECODE_ERROR) {
-            return MMU_TRANSLATE_GPA_UNMAPPED;
-        } else if (mem_tx_res == MEMTX_ACCESS_ERROR) {
-            return MMU_TRANSLATE_GPA_NO_WRITE_ACCESS;
+        if (mem_tx_res == MEMTX_DECODE_ERROR ||
+            mem_tx_res == MEMTX_ACCESS_ERROR) {
+            MemoryRegionSection section =
+                memory_region_find(get_system_memory(), gpa, copy);
+            bool readonly = section.mr &&
+                (section.readonly || memory_region_is_rom(section.mr));
+
+            if (section.mr) {
+                memory_region_unref(section.mr);
+            }
+
+            /*
+             * A CPU store to physical ROM is ignored by the hardware.  In
+             * particular, WHPX exits to this emulator for such a store and
+             * address_space_write() reports MEMTX_DECODE_ERROR for a plain
+             * ROM region (or MEMTX_ACCESS_ERROR for some protected memory).
+             * Treating it as an emulation failure leaves RIP on the same
+             * instruction forever, most visibly with REP MOVS.
+             *
+             * Keep reporting access errors from writable MMIO regions:
+             * those are device failures, not normal ROM write protection.
+             */
+            if (!readonly) {
+                return mem_tx_res == MEMTX_DECODE_ERROR ?
+                    MMU_TRANSLATE_GPA_UNMAPPED :
+                    MMU_TRANSLATE_GPA_NO_WRITE_ACCESS;
+            }
         }
 
         bytes -= copy;
