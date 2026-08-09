@@ -392,3 +392,17 @@ scsi_generic_ioctl_sgio_command(uint8_t cmd, uint32_t timeout) "generic ioctl sg
 scsi_generic_ioctl_sgio_done(uint8_t cmd, int ret, uint8_t status, uint8_t host_status) "generic ioctl sgio: cmd=0x%x ret=%d status=0x%x host_status=0x%x"
 scsi_generic_persistent_reserve_out_reply(uint8_t service_action, uint8_t resv_type, uint64_t old_key, uint64_t new_key) "persistent reserve out reply service_action=%u resv_type=%u old_key=0x%" PRIx64 " new_key=0x%" PRIx64
 scsi_generic_pr_state_preempt(uint64_t key, uint8_t resv_type) "key=0x%" PRIx64 " resv_type=%u"
+
+# pc98-scsi.c
+pc98_scsi_command(uint8_t command) "command=0x%02x"
+pc98_scsi_submit(int target, int lun, uint8_t opcode, unsigned int cdb_len) "target=%d lun=%d opcode=0x%02x cdb_len=%u"
+pc98_scsi_complete(uint8_t opcode, uint8_t status, size_t resid) "opcode=0x%02x status=0x%02x resid=%zu"
+pc98_scsi_csr_read(uint8_t csr, uint8_t asr) "csr=0x%02x asr=0x%02x"
+pc98_scsi_irq_schedule(uint8_t csr, uint8_t asr, uint8_t membank, bool enabled) "csr=0x%02x asr=0x%02x membank=0x%02x enabled=%d"
+pc98_scsi_irq_fire(uint8_t csr, uint8_t asr, uint8_t membank) "csr=0x%02x asr=0x%02x membank=0x%02x"
+pc98_scsi_target_lun_write(uint8_t value, uint8_t lun) "value=0x%02x lun=%u"
+pc98_scsi_message_out(uint8_t value, uint8_t lun) "value=0x%02x lun=%u"
+pc98_scsi_cdb_byte(uint8_t value, unsigned int pos, unsigned int len) "value=0x%02x pos=%u len=%u"
+pc98_scsi_inquiry(int target, int lun, uint8_t type, bool removable, const char *vendor, const char *product) "target=%d lun=%d type=0x%02x removable=%d vendor='%.8s' product='%.16s'"
+pc98_scsi_transfer(uint8_t opcode, uint32_t len, uint8_t byte0, uint8_t byte1, uint8_t cdb2, uint8_t cdb4) "opcode=0x%02x len=%u byte0=0x%02x byte1=0x%02x cdb2=0x%02x cdb4=0x%02x"
+pc98_scsi_dma_transfer(int channel, int position, int dma_len, uint32_t async_len, uint32_t transfer_count, int count) "channel=%d position=%d dma_len=%d async_len=%u transfer_count=%u count=%d"
