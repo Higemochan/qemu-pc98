@@ -1355,7 +1355,6 @@ ata_wait_drq:
 	ret
 
 ata_failed:
-jmp ata_failed
 	movb	$0x40, %ah		/* equipment/not-ready class error */
 	stc
 	ret
