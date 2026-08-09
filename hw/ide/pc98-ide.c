@@ -79,8 +79,22 @@ static void pc98_ide_trace(const char *tag, int reg, uint32_t val)
 #endif
 
 #define PC98_IDE_NBUS 2
-#define PC98_IDE_HEADS 8
-#define PC98_IDE_SECTORS 17
+
+/*
+ * Power-on translation advertised by IDENTIFY.  The PC-98 IDE BIOS probes
+ * with the usual 16/63 large-disk translation and then narrows it down with
+ * INITIALIZE DEVICE PARAMETERS, so the drive has to come up this way
+ * regardless of what hd_geometry_guess() would infer from the image.
+ */
+#define PC98_IDE_HEADS 16
+#define PC98_IDE_SECTORS 63
+
+/*
+ * ATA caps the reported cylinder count at 16383 for drives larger than about
+ * 8 GB.  PC-98 reports 16387 instead.
+ */
+#define PC98_IDE_MAX_CYLS       16383
+#define PC98_IDE_LARGE_CYLS     16387
 #define PC98_IDE_BANK_SECONDARY 0x01
 #define PC98_IDE_BANK_DWORD     0x08
 #define PC98_IDE_BANK_WRITABLE  0x39
@@ -440,8 +454,7 @@ static void pc98_ide_pre_plug(HotplugHandler *hotplug_dev,
 {
     IDEDevice *ide;
     int64_t bytes;
-//    uint64_t sectors, cylinders;
-//    uint32_t cyls;
+    uint64_t sectors, cylinders;
 
     if (!object_dynamic_cast(OBJECT(dev), "ide-hd")) {
         return;
@@ -459,26 +472,18 @@ static void pc98_ide_pre_plug(HotplugHandler *hotplug_dev,
                          "Could not determine PC-98 IDE disk size");
         return;
     }
-#if 0
+
     sectors = bytes / BDRV_SECTOR_SIZE;
     cylinders = sectors / (PC98_IDE_HEADS * PC98_IDE_SECTORS);
     if (cylinders < 1) {
-        cyls = 1;
-    } else if (cylinders > 65535) {
-        cyls = 65535;
-    } else {
-        cyls = cylinders;
+        cylinders = 1;
+    } else if (cylinders > PC98_IDE_MAX_CYLS) {
+        cylinders = PC98_IDE_LARGE_CYLS;
     }
 
-    /*
-     * Generic IDE otherwise advertises 16 heads and 63 sectors.  NEC DOS
-     * uses IDENTIFY geometry to interpret the PC-98 partition table, whose
-     * fixed-disk convention is 8 heads by 17 sectors.
-     */
-    ide->conf.cyls = cyls;
+    ide->conf.cyls = cylinders;
     ide->conf.heads = PC98_IDE_HEADS;
     ide->conf.secs = PC98_IDE_SECTORS;
-#endif
 }
 
 static void pc98_ide_realize(DeviceState *dev, Error **errp)

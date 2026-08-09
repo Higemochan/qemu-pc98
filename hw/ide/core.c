@@ -128,7 +128,7 @@ static void ide_identify_size(IDEState *s)
 static void ide_identify(IDEState *s)
 {
     uint16_t *p;
-//    unsigned int oldsize;	intのサイズが不明 さすがに32bitはあるはずだが…
+    unsigned int oldsize;
     IDEDevice *dev = s->unit ? s->bus->slave : s->bus->master;
 
     p = (uint16_t *)s->identify_data;
@@ -136,20 +136,13 @@ static void ide_identify(IDEState *s)
         goto fill_buffer;
     }
     memset(p, 0, sizeof(s->identify_data));
-    uint64_t oldsize;
-    oldsize = s->cylinders * s->heads * s->sectors;
+
     put_le16(p + 0, 0x0040);
-//    put_le16(p + 1, s->cylinders);
-    if (oldsize < 16513024) //8063*1024*1024/512 8GB未満はそのまま返事
-     put_le16(p + 1, (s->cylinders*s->heads*s->sectors)/(16*63));
-    else
-     put_le16(p + 1, 16387);
-//    put_le16(p + 3, s->heads);
-    put_le16(p + 3, 16);
+    put_le16(p + 1, s->cylinders);
+    put_le16(p + 3, s->heads);
     put_le16(p + 4, 512 * s->sectors); /* XXX: retired, remove ? */
     put_le16(p + 5, 512); /* XXX: retired, remove ? */
-//    put_le16(p + 6, s->sectors);
-    put_le16(p + 6, 63);
+    put_le16(p + 6, s->sectors);
     padstr((char *)(p + 10), s->drive_serial_str, 20); /* serial number */
     put_le16(p + 20, 3); /* XXX: retired, remove ? */
     put_le16(p + 21, 512); /* cache size in sectors */
@@ -167,7 +160,7 @@ static void ide_identify(IDEState *s)
     put_le16(p + 54, s->cylinders);
     put_le16(p + 55, s->heads);
     put_le16(p + 56, s->sectors);
-//    oldsize = s->cylinders * s->heads * s->sectors;
+    oldsize = s->cylinders * s->heads * s->sectors;
     put_le16(p + 57, oldsize);
     put_le16(p + 58, oldsize >> 16);
     if (s->mult_sectors)
@@ -1662,17 +1655,24 @@ static bool cmd_check_power_mode(IDEState *s, uint8_t cmd)
 /* INITIALIZE DEVICE PARAMETERS */
 static bool cmd_specify(IDEState *s, uint8_t cmd)
 {
-    if ((s->blk && s->drive_kind != IDE_CD) && (s->nsector != 0)) {
-        uint16_t *identify_data;
-        identify_data = (uint16_t *)s->identify_data;
-        uint64_t sectors;
-        sectors = s->cylinders * s->heads * s->sectors;
-        s->heads = (s->select & (ATA_DEV_HS)) + 1;
+    if (s->blk && s->drive_kind != IDE_CD && s->nsector != 0) {
+        uint16_t *identify_data = (uint16_t *)s->identify_data;
+        uint64_t chs_sectors = (uint64_t)s->cylinders * s->heads * s->sectors;
+
+        s->heads = (s->select & ATA_DEV_HS) + 1;
         s->sectors = s->nsector;
-        s->cylinders = sectors /(s->heads * s->sectors);
+        s->cylinders = chs_sectors / (s->heads * s->sectors);
+
+        /*
+         * Words 54..56 report the geometry currently in effect, so they have
+         * to follow the translation just selected by the host.  Guests that
+         * re-read IDENTIFY after INITIALIZE DEVICE PARAMETERS (the PC-98 IDE
+         * BIOS does) otherwise keep using the power-on default.
+         */
         put_le16(identify_data + 54, s->cylinders);
         put_le16(identify_data + 55, s->heads);
         put_le16(identify_data + 56, s->sectors);
+
         ide_bus_set_irq(s->bus);
     } else {
         ide_abort_command(s);
