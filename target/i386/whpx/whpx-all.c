@@ -986,7 +986,7 @@ void whpx_get_registers(CPUState *cpu, WHPXStateLevel level)
 
     assert(idx == RTL_NUMBER_OF(whpx_register_names));
 
-    if (whpx_irqchip_in_kernel()) {
+    if (whpx_irqchip_in_kernel() && x86_cpu->apic_state) {
         whpx_apic_get(x86_cpu->apic_state);
     }
 
