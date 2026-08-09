@@ -39,7 +39,6 @@
 #define PCSPK_BUF_LEN 1792
 #define PCSPK_SAMPLE_RATE 32000
 #define PCSPK_MAX_FREQ (PCSPK_SAMPLE_RATE >> 1)
-#define PCSPK_MIN_COUNT DIV_ROUND_UP(PIT_FREQ, PCSPK_MAX_FREQ)
 
 OBJECT_DECLARE_SIMPLE_TYPE(PCSpkState, PC_SPEAKER)
 
@@ -52,6 +51,8 @@ struct PCSpkState {
     AudioBackend *audio_be;
     SWVoiceOut *voice;
     PITCommonState *pit;
+    uint32_t pit_frequency;
+    uint8_t pit_channel;
     unsigned int pit_count;
     unsigned int samples;
     unsigned int play_pos;
@@ -67,10 +68,12 @@ static inline void generate_samples(PCSpkState *s)
 
     if (s->pit_count) {
         const uint32_t m = PCSPK_SAMPLE_RATE * s->pit_count;
-        const uint32_t n = ((uint64_t)PIT_FREQ << 32) / m;
+        const uint32_t n = ((uint64_t)s->pit_frequency << 32) / m;
 
         /* multiple of wavelength for gapless looping */
-        s->samples = (QEMU_ALIGN_DOWN(PCSPK_BUF_LEN * PIT_FREQ, m) / (PIT_FREQ >> 1) + 1) >> 1;
+        s->samples =
+            (QEMU_ALIGN_DOWN(PCSPK_BUF_LEN * s->pit_frequency, m) /
+             (s->pit_frequency >> 1) + 1) >> 1;
         for (i = 0; i < s->samples; ++i)
             s->sample_buf[i] = (64 & (n * i >> 25)) - 32;
     } else {
@@ -86,7 +89,7 @@ static void pcspk_callback(void *opaque, int free)
     PITChannelInfo ch;
     unsigned int n;
 
-    pit_get_channel_info(s->pit, 2, &ch);
+    pit_get_channel_info(s->pit, s->pit_channel, &ch);
 
     if (ch.mode != 3) {
         return;
@@ -94,8 +97,9 @@ static void pcspk_callback(void *opaque, int free)
 
     n = ch.initial_count;
     /* avoid frequencies that are not reproducible with sample rate */
-    if (n < PCSPK_MIN_COUNT)
+    if (n < DIV_ROUND_UP(s->pit_frequency, PCSPK_MAX_FREQ)) {
         n = 0;
+    }
 
     if (s->pit_count != n) {
         s->pit_count = n;
@@ -138,7 +142,7 @@ static uint64_t pcspk_io_read(void *opaque, hwaddr addr,
     PITChannelInfo ch;
     uint8_t val;
 
-    pit_get_channel_info(s->pit, 2, &ch);
+    pit_get_channel_info(s->pit, s->pit_channel, &ch);
 
     s->dummy_refresh_clock ^= (1 << 4);
 
@@ -159,11 +163,25 @@ static void pcspk_io_write(void *opaque, hwaddr addr, uint64_t val,
     trace_pcspk_io_write(s->iobase, val);
 
     s->data_on = (val >> 1) & 1;
-    pit_set_gate(s->pit, 2, gate);
+    pit_set_gate(s->pit, s->pit_channel, gate);
     if (s->voice) {
         if (gate) /* restart */
             s->play_pos = 0;
         audio_be_set_active_out(s->audio_be, s->voice, gate & s->data_on);
+    }
+}
+
+static void pcspk_gate_in(void *opaque, int n, int level)
+{
+    PCSpkState *s = opaque;
+
+    s->data_on = 1;
+    pit_set_gate(s->pit, s->pit_channel, level);
+    if (s->voice) {
+        if (level) {
+            s->play_pos = 0;
+        }
+        audio_be_set_active_out(s->audio_be, s->voice, level);
     }
 }
 
@@ -181,6 +199,7 @@ static void pcspk_initfn(Object *obj)
     PCSpkState *s = PC_SPEAKER(obj);
 
     memory_region_init_io(&s->ioport, OBJECT(s), &pcspk_io_ops, s, "pcspk", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), pcspk_gate_in, "gate", 1);
 }
 
 static void pcspk_realizefn(DeviceState *dev, Error **errp)
@@ -193,7 +212,9 @@ static void pcspk_realizefn(DeviceState *dev, Error **errp)
         return;
     }
 
-    isa_register_ioport(isadev, &s->ioport, s->iobase);
+    if (s->iobase) {
+        isa_register_ioport(isadev, &s->ioport, s->iobase);
+    }
 
     if (s->audio_be && audio_be_check(&s->audio_be, errp)) {
         pcspk_audio_init(s);
@@ -215,6 +236,8 @@ static const VMStateDescription vmstate_spk = {
 static const Property pcspk_properties[] = {
     DEFINE_AUDIO_PROPERTIES(PCSpkState, audio_be),
     DEFINE_PROP_UINT32("iobase", PCSpkState, iobase,  0x61),
+    DEFINE_PROP_UINT32("pit-frequency", PCSpkState, pit_frequency, PIT_FREQ),
+    DEFINE_PROP_UINT8("pit-channel", PCSpkState, pit_channel, 2),
     DEFINE_PROP_LINK("pit", PCSpkState, pit, TYPE_PIT_COMMON, PITCommonState *),
 };
 
