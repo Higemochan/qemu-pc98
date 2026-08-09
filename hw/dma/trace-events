@@ -20,6 +20,8 @@ sparc32_dma_enable_lower(void) "Lower DMA enable"
 
 # i8257.c
 i8257_unregistered_dma(int nchan, int dma_pos, int dma_len) "unregistered DMA channel used nchan=%d dma_pos=%d dma_len=%d"
+pc98_dma_channel_run(int channel, uint32_t address, uint32_t count, int position, uint8_t mode, uint8_t mask, uint8_t status) "channel=%d address=0x%06x count=%u position=%d mode=0x%02x mask=0x%02x status=0x%02x"
+pc98_dma_channel_result(int channel, int position, uint8_t status) "channel=%d position=%d status=0x%02x"
 
 # pl330.c
 pl330_fault(void *ptr, uint32_t flags) "ch: %p, flags: 0x%"PRIx32
