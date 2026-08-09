@@ -132,6 +132,10 @@ vga_vbe_read(uint32_t index, uint32_t val) "index 0x%x, val 0x%x"
 vga_vbe_write(uint32_t index, uint32_t val) "index 0x%x, val 0x%x"
 
 # cirrus_vga.c
+pc98_coregraph_index_write(uint8_t index) "index 0x%02x"
+pc98_coregraph_control_write(uint8_t index, uint8_t value) "reg 0x%02x <- 0x%02x"
+pc98_coregraph_control_read(uint8_t index, uint8_t value) "reg 0x%02x -> 0x%02x"
+pc98_vga_mode_write(uint16_t port, uint8_t value) "port 0x%04x <- 0x%02x"
 vga_cirrus_read_io(uint32_t addr, uint32_t val) "addr 0x%x, val 0x%x"
 vga_cirrus_write_io(uint32_t addr, uint32_t val) "addr 0x%x, val 0x%x"
 vga_cirrus_write_blt(uint32_t offset, uint32_t val) "offset 0x%x, val 0x%x"
@@ -225,4 +229,7 @@ apple_gfx_iosfc_map_memory_new_region(size_t i, void *region, uint64_t start, ui
 apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *f) "a=%p b=%p c=%p d=%p e=%p f=%p"
 apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
 apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
-
+pc98_coregraph_video_enable(uint8_t on) "video enable %u"
+pc98_coregraph_isa_window(uint64_t base, uint64_t size) "isa window base 0x%" PRIx64 " size 0x%" PRIx64
+pc98_coregraph_solid_brush(uint32_t addr, uint8_t color) "source 0x%08x foreground 0x%02x"
+pc98_coregraph_blt_reset_start(uint8_t old, uint8_t value) "split GR31 0x%02x -> 0x%02x"
