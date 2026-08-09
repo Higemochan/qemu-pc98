@@ -1655,9 +1655,24 @@ static bool cmd_check_power_mode(IDEState *s, uint8_t cmd)
 /* INITIALIZE DEVICE PARAMETERS */
 static bool cmd_specify(IDEState *s, uint8_t cmd)
 {
-    if (s->blk && s->drive_kind != IDE_CD) {
-        s->heads = (s->select & (ATA_DEV_HS)) + 1;
+    if (s->blk && s->drive_kind != IDE_CD && s->nsector != 0) {
+        uint16_t *identify_data = (uint16_t *)s->identify_data;
+        uint64_t chs_sectors = (uint64_t)s->cylinders * s->heads * s->sectors;
+
+        s->heads = (s->select & ATA_DEV_HS) + 1;
         s->sectors = s->nsector;
+        s->cylinders = chs_sectors / (s->heads * s->sectors);
+
+        /*
+         * Words 54..56 report the geometry currently in effect, so they have
+         * to follow the translation just selected by the host.  Guests that
+         * re-read IDENTIFY after INITIALIZE DEVICE PARAMETERS (the PC-98 IDE
+         * BIOS does) otherwise keep using the power-on default.
+         */
+        put_le16(identify_data + 54, s->cylinders);
+        put_le16(identify_data + 55, s->heads);
+        put_le16(identify_data + 56, s->sectors);
+
         ide_bus_set_irq(s->bus);
     } else {
         ide_abort_command(s);
