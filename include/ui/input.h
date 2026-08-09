@@ -37,12 +37,15 @@ typedef struct QemuInputEvent {
 typedef void (*QemuInputHandlerEvent)(DeviceState *dev, QemuConsole *src,
                                       QemuInputEvent *evt);
 typedef void (*QemuInputHandlerSync)(DeviceState *dev);
+typedef unsigned int (*QemuInputHandlerKeycodeFromKeysym)(
+    DeviceState *dev, uint32_t keysym, unsigned int keycode);
 
 struct QemuInputHandler {
     const char             *name;
     uint32_t               mask;
     QemuInputHandlerEvent  event;
     QemuInputHandlerSync   sync;
+    QemuInputHandlerKeycodeFromKeysym keycode_from_keysym;
 };
 
 G_GNUC_WARN_UNUSED_RESULT
@@ -68,6 +71,9 @@ unsigned int qemu_input_key_number_to_linux(unsigned int nr);
 unsigned int qemu_input_key_value_to_linux(const KeyValue *value);
 int qemu_input_linux_to_scancode(unsigned int lnx, bool down, int *codes);
 int qemu_input_linux_to_qcode(unsigned int lnx);
+unsigned int qemu_input_keycode_from_keysym(const QemuConsole *con,
+                                            uint32_t keysym,
+                                            unsigned int keycode);
 
 void qemu_input_queue_btn(QemuConsole *src, InputButton btn, bool down);
 void qemu_input_update_buttons(QemuConsole *src, uint32_t *button_map,
