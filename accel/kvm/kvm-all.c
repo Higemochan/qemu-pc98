@@ -3062,6 +3062,12 @@ static int kvm_init(AccelState *as, MachineState *ms)
         (kvm_supported_memory_attributes & KVM_MEMORY_ATTRIBUTE_PRIVATE);
     kvm_pre_fault_memory_supported = kvm_vm_check_extension(s, KVM_CAP_PRE_FAULT_MEMORY);
 
+    if (mc->get_kernel_irqchip_default && !s->kernel_irqchip_required &&
+        !mc->get_kernel_irqchip_default(ms)) {
+        /* the board's interrupt controller cannot live in the kernel */
+        s->kernel_irqchip_allowed = false;
+    }
+
     if (s->kernel_irqchip_split == ON_OFF_AUTO_AUTO) {
         s->kernel_irqchip_split = mc->default_kernel_irqchip_split ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
     }
