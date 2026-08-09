@@ -498,6 +498,7 @@ static int64_t coroutine_fn raw_co_getlength(BlockDriverState *bs)
     LARGE_INTEGER l;
     ULARGE_INTEGER available, total, total_free;
     DISK_GEOMETRY_EX dg;
+    DISK_GEOMETRY geometry;
     DWORD count;
     BOOL status;
 
@@ -517,6 +518,33 @@ static int64_t coroutine_fn raw_co_getlength(BlockDriverState *bs)
                                  NULL, 0, &dg, sizeof(dg), &count, NULL);
         if (status != 0) {
             l = dg.DiskSize;
+            if (l.QuadPart == 0) {
+                l.QuadPart = dg.Geometry.Cylinders.QuadPart *
+                    dg.Geometry.TracksPerCylinder *
+                    dg.Geometry.SectorsPerTrack *
+                    dg.Geometry.BytesPerSector;
+            }
+        } else {
+            /*
+             * USB floppy drivers commonly implement the original geometry
+             * ioctl but not IOCTL_DISK_GET_DRIVE_GEOMETRY_EX.  Compute the
+             * media length from that geometry instead of returning an
+             * uninitialized (usually zero) length.
+             */
+            status = DeviceIoControl(s->hfile,
+                                     IOCTL_DISK_GET_DRIVE_GEOMETRY,
+                                     NULL, 0, &geometry, sizeof(geometry),
+                                     &count, NULL);
+            if (status == 0) {
+                return -EIO;
+            }
+            l.QuadPart = geometry.Cylinders.QuadPart *
+                geometry.TracksPerCylinder *
+                geometry.SectorsPerTrack *
+                geometry.BytesPerSector;
+        }
+        if (l.QuadPart <= 0) {
+            return -EIO;
         }
         break;
     default:
