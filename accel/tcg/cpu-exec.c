@@ -968,10 +968,24 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             if (tb == NULL) {
                 CPUJumpCache *jc;
                 uint32_t h;
+                unsigned flush_count;
+
+                flush_count = qatomic_read(&tb_ctx.tb_flush_count);
 
                 mmap_lock();
                 tb = tb_gen_code(cpu, s);
                 mmap_unlock();
+
+                /*
+                 * A full code buffer is flushed inline when this cpu is
+                 * in serial context, which frees every TB, last_tb
+                 * included.  Linking a jump into it would write through
+                 * a dangling pointer, and leave that pointer in the new
+                 * TB's jump list for tb_jmp_unlink() to follow later.
+                 */
+                if (qatomic_read(&tb_ctx.tb_flush_count) != flush_count) {
+                    last_tb = NULL;
+                }
 
                 /*
                  * We add the TB in the virtual pc hash table
