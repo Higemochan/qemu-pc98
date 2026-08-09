@@ -80,6 +80,8 @@
 
 #define PC98_FDC_MSR       0x0090
 #define PC98_FDC_FIFO      0x0092
+#define PC98_FDC_CTRL      0x0094
+#define PC98_KBD_STATUS    0x0043
 
 #define PC98_ROM_BANK_PORT    0x043f
 #define PC98_ROM_WINDOW       0xf8000
@@ -122,8 +124,21 @@
 #define FDC_MSR_RQM        0x80
 
 #define FDC_CMD_READ_ID    0x4a
+#define FDC_CMD_READ_DATA  0x46
 #define FDC_ST0_ABNTERM    0x40
 #define FDC_ST1_NO_DATA    0x04
+
+#define PC98_FDC_CTRL_MOTOR  0x08
+#define PC98_FDC_CTRL_DMA_EN 0x10
+#define PC98_FDC_CTRL_NRESET 0x80
+
+#define PC98_DMA2_ADDR       0x09
+#define PC98_DMA2_COUNT      0x0b
+#define PC98_DMA2_MASK       0x15
+#define PC98_DMA_MODE        0x17
+#define PC98_DMA_CLEAR_FF    0x19
+#define PC98_DMA_RESET       0x1b
+#define PC98_DMA2_PAGE       0x23
 
 #define E8390_STOP         0x01
 #define E8390_START        0x02
@@ -335,6 +350,169 @@ static void test_pc98_fdc_empty_read_id(void)
     g_assert_cmphex(qtest_inb(qts, PC98_FDC_MSR), ==, FDC_MSR_RQM);
 
     qtest_quit(qts);
+}
+
+static void test_pc98_keyboard_status(void)
+{
+    QTestState *qts;
+
+    qts = qtest_init("-machine pc9801 -nodefaults -display none");
+
+    /* The PC-98 keyboard 8251 has TX ready/empty and DSR asserted. */
+    g_assert_cmphex(qtest_inb(qts, PC98_KBD_STATUS) & 0x85, ==, 0x85);
+
+    qtest_quit(qts);
+}
+
+static void test_pc98_fdc_2hd_1024_pio_read(void)
+{
+    g_autoptr(GError) err = NULL;
+    g_autofree char *image = NULL;
+    QTestState *qts;
+    uint8_t sector[1024];
+    uint8_t result[7];
+    const unsigned int cylinder = 3;
+    const unsigned int head = 1;
+    const unsigned int sector_id = 5;
+    const size_t image_size = 77 * 2 * 8 * sizeof(sector);
+    const size_t sector_offset =
+        ((cylinder * 2 + head) * 8 + sector_id - 1) * sizeof(sector);
+    int fd;
+    int i;
+
+    fd = g_file_open_tmp("qemu-pc98-fdc-XXXXXX", &image, &err);
+    g_assert_no_error(err);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, image_size), ==, 0);
+    for (i = 0; i < sizeof(sector); i++) {
+        sector[i] = (i * 37 + 0x5a) & 0xff;
+    }
+    g_assert_cmpint(lseek(fd, sector_offset, SEEK_SET), ==, sector_offset);
+    g_assert_cmpint(qemu_write_full(fd, sector, sizeof(sector)), ==,
+                    sizeof(sector));
+    close(fd);
+
+    qts = qtest_initf(
+        "-machine pc9801 -nodefaults -display none "
+        "-drive if=floppy,unit=0,format=raw,file=%s",
+        image);
+
+    /* PC-98 BIOS-style polled PIO: motor and reset, IRQ/DMA disabled. */
+    qtest_outb(qts, PC98_FDC_CTRL,
+               PC98_FDC_CTRL_MOTOR | PC98_FDC_CTRL_NRESET);
+    qtest_outb(qts, PC98_FDC_FIFO, FDC_CMD_READ_DATA);
+    qtest_outb(qts, PC98_FDC_FIFO, 0x00); /* unit 0, head 0 select */
+    qtest_outb(qts, PC98_FDC_FIFO, cylinder);
+    qtest_outb(qts, PC98_FDC_FIFO, head);
+    qtest_outb(qts, PC98_FDC_FIFO, sector_id);
+    qtest_outb(qts, PC98_FDC_FIFO, 3); /* 1024-byte physical sector */
+    /* PC-98 polled PIO still completes one sector when EOT is track end. */
+    qtest_outb(qts, PC98_FDC_FIFO, 8);
+    qtest_outb(qts, PC98_FDC_FIFO, 0x2a);
+    qtest_outb(qts, PC98_FDC_FIFO, 0xff);
+
+    for (i = 0; i < sizeof(sector); i++) {
+        g_assert_cmphex(qtest_inb(qts, PC98_FDC_MSR) &
+                        (FDC_MSR_RQM | FDC_MSR_DIO | FDC_MSR_CMD_BUSY), ==,
+                        FDC_MSR_RQM | FDC_MSR_DIO | FDC_MSR_CMD_BUSY);
+        g_assert_cmphex(qtest_inb(qts, PC98_FDC_FIFO), ==, sector[i]);
+    }
+    for (i = 0; i < G_N_ELEMENTS(result); i++) {
+        result[i] = qtest_inb(qts, PC98_FDC_FIFO);
+    }
+    g_assert_cmphex(result[0] & 0xc0, ==, 0x00);
+    g_assert_cmphex(result[1], ==, 0x00);
+    g_assert_cmphex(result[2], ==, 0x00);
+    g_assert_cmphex(result[3], ==, cylinder);
+    g_assert_cmphex(result[4], ==, head);
+    g_assert_cmphex(result[5], ==, sector_id);
+    g_assert_cmphex(result[6], ==, 3);
+    g_assert_cmphex(qtest_inb(qts, PC98_FDC_MSR), ==, FDC_MSR_RQM);
+
+    /* BIOS SENSE reissues SPECIFY and READ ID after data transfers. */
+    qtest_outb(qts, PC98_FDC_FIFO, 0x03);
+    qtest_outb(qts, PC98_FDC_FIFO, 0xdf);
+    qtest_outb(qts, PC98_FDC_FIFO, 0x03);
+    qtest_outb(qts, PC98_FDC_FIFO, FDC_CMD_READ_ID);
+    qtest_outb(qts, PC98_FDC_FIFO, 0x00);
+    for (i = 0; i < G_N_ELEMENTS(result); i++) {
+        result[i] = qtest_inb(qts, PC98_FDC_FIFO);
+    }
+    g_assert_cmphex(result[0] & 0xc0, ==, 0x00);
+    g_assert_cmphex(result[1], ==, 0x00);
+    g_assert_cmphex(result[2], ==, 0x00);
+    g_assert_cmphex(result[6], ==, 3);
+    g_assert_cmphex(qtest_inb(qts, PC98_FDC_MSR), ==, FDC_MSR_RQM);
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_remove(image), ==, 0);
+}
+
+static void test_pc98_fdc_2hd_1024_dma_read(void)
+{
+    g_autoptr(GError) err = NULL;
+    g_autofree char *image = NULL;
+    QTestState *qts;
+    uint8_t expected[4 * 1024];
+    uint8_t actual[4 * 1024];
+    const unsigned int cylinder = 3;
+    const unsigned int head = 1;
+    const unsigned int sector_id = 5;
+    const size_t sector_size = 1024;
+    const size_t image_size = 77 * 2 * 8 * sector_size;
+    const size_t sector_offset =
+        ((cylinder * 2 + head) * 8 + sector_id - 1) * sector_size;
+    const uint16_t dma_address = 0x8000;
+    const uint16_t dma_count = sizeof(expected) - 1;
+    int fd;
+    int i;
+
+    fd = g_file_open_tmp("qemu-pc98-fdc-dma-XXXXXX", &image, &err);
+    g_assert_no_error(err);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, image_size), ==, 0);
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = (i * 53 + 0xc3) & 0xff;
+    }
+    g_assert_cmpint(lseek(fd, sector_offset, SEEK_SET), ==, sector_offset);
+    g_assert_cmpint(qemu_write_full(fd, expected, sizeof(expected)), ==,
+                    sizeof(expected));
+    close(fd);
+
+    qts = qtest_initf(
+        "-machine pc9801 -nodefaults -display none "
+        "-drive if=floppy,unit=0,format=raw,file=%s",
+        image);
+
+    qtest_outb(qts, PC98_DMA_RESET, 0);
+    qtest_outb(qts, PC98_DMA_CLEAR_FF, 0);
+    qtest_outb(qts, PC98_DMA2_ADDR, dma_address & 0xff);
+    qtest_outb(qts, PC98_DMA2_ADDR, dma_address >> 8);
+    qtest_outb(qts, PC98_DMA2_COUNT, dma_count & 0xff);
+    qtest_outb(qts, PC98_DMA2_COUNT, dma_count >> 8);
+    qtest_outb(qts, PC98_DMA2_PAGE, 0);
+    qtest_outb(qts, PC98_DMA_MODE, 0x46); /* single, device-to-memory, ch2 */
+    qtest_outb(qts, PC98_DMA2_MASK, 0x02); /* unmask channel 2 */
+
+    qtest_outb(qts, PC98_FDC_CTRL,
+               PC98_FDC_CTRL_MOTOR | PC98_FDC_CTRL_DMA_EN |
+               PC98_FDC_CTRL_NRESET);
+    qtest_outb(qts, PC98_FDC_FIFO, FDC_CMD_READ_DATA);
+    qtest_outb(qts, PC98_FDC_FIFO, 0x00);
+    qtest_outb(qts, PC98_FDC_FIFO, cylinder);
+    qtest_outb(qts, PC98_FDC_FIFO, head);
+    qtest_outb(qts, PC98_FDC_FIFO, sector_id);
+    qtest_outb(qts, PC98_FDC_FIFO, 3);
+    qtest_outb(qts, PC98_FDC_FIFO, 8); /* sectors 5 through 8 */
+    qtest_outb(qts, PC98_FDC_FIFO, 0x2a);
+    qtest_outb(qts, PC98_FDC_FIFO, 0xff);
+
+    qtest_clock_step(qts, 1000000);
+    qtest_memread(qts, dma_address, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_remove(image), ==, 0);
 }
 
 static void test_pc98_basic_rom_bank(void)
@@ -1085,6 +1263,12 @@ int main(int argc, char **argv)
                    test_pc98_lgy98_port_map);
     qtest_add_func("/pc98/fdc/empty-read-id",
                    test_pc98_fdc_empty_read_id);
+    qtest_add_func("/pc98/fdc/2hd-1024-pio-read",
+                   test_pc98_fdc_2hd_1024_pio_read);
+    qtest_add_func("/pc98/fdc/2hd-1024-dma-read",
+                   test_pc98_fdc_2hd_1024_dma_read);
+    qtest_add_func("/pc98/keyboard/status",
+                   test_pc98_keyboard_status);
     qtest_add_func("/pc98/basic/rom-bank",
                    test_pc98_basic_rom_bank);
     qtest_add_func("/pc98/opna/pcm-fifo-irq",

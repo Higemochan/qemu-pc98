@@ -435,7 +435,7 @@ static void pc98_kbd_ctl_write(void *opaque, uint32_t addr, uint32_t value)
 static uint32_t pc98_kbd_status_read(void *opaque, uint32_t addr)
 {
     Pc98KbdState *s = opaque;
-    uint8_t value = s->status_reg;
+    uint8_t value = s->status_reg | KST_DSR;
 
     if (s->tx_enabled) {
         s->status_reg |= KST_TXEMPTY;
@@ -492,7 +492,7 @@ static void pc98_kbd_reset(DeviceState *dev)
     memset(s->key_down, 0, sizeof(s->key_down));
 
     s->cfg_phase = CFG_AWAIT_MODE;
-    s->status_reg = KST_TXRDY | KST_TXEMPTY;
+    s->status_reg = KST_TXRDY | KST_TXEMPTY | KST_DSR;
     s->rts = true;
     s->rx_enabled = false;
     s->tx_enabled = false;

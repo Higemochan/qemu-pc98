@@ -186,6 +186,7 @@ struct FDCtrl {
     /* NEC PC-98 (uPD765A): per-drive SENSE INTERRUPT status queue */
     uint8_t pc98;
     uint8_t pc98_force_ready;
+    uint8_t pc98_dma_enabled;
     uint8_t pc98_status0[4];
     uint8_t pc98_pcn[4];
 };
@@ -194,6 +195,7 @@ struct FDCtrl {
 
 static uint32_t pc98fdc_reg_read(void *opaque, uint32_t reg);
 static void pc98fdc_reg_write(void *opaque, uint32_t reg, uint32_t value);
+static void fdctrl_result_timer(void *opaque);
 static void pc98fdc_ctrl_reset(FDCtrl *fdctrl, int do_irq);
 static void pc98fdc_realize_common(DeviceState *dev, FDCtrl *fdctrl,
                                    Error **errp);
@@ -1736,19 +1738,23 @@ static void fdctrl_start_transfer(FDCtrl *fdctrl, int direction)
             fdctrl->fifo[5] = ks;
             return;
         }
-        if (fdctrl->pc98) {
-            /*
-             * uPD765A: transfer until the DMA terminal count; only
-             * multi-track transfers use the EOT-based length.
-             */
-            tmp = (fdctrl->fifo[0] & 0x80) ? tmp : 1;
+        /*
+         * PC-98 BIOS-style polled PIO issues a non-MT command with EOT set
+         * to the physical end of the track, but consumes one sector per
+         * command.  Extending that PIO phase through EOT overwrites the
+         * caller's one-sector buffer.  DMA, on the other hand, must retain
+         * the normal uPD765 R-through-EOT transfer length.
+         */
+        if (fdctrl->pc98 && !fdctrl->pc98_dma_enabled) {
+            tmp = 1;
         } else if (fdctrl->fifo[0] & 0x80) {
             tmp += fdctrl->fifo[6];
         }
         fdctrl->data_len *= tmp;
     }
     fdctrl->eot = fdctrl->fifo[6];
-    if (fdctrl->dor & FD_DOR_DMAEN) {
+    if ((fdctrl->dor & FD_DOR_DMAEN) &&
+        (!fdctrl->pc98 || fdctrl->pc98_dma_enabled)) {
         /* DMA transfer is enabled. */
         IsaDmaClass *k = ISADMA_GET_CLASS(fdctrl->dma);
 
@@ -2156,6 +2162,17 @@ static void fdctrl_handle_readid(FDCtrl *fdctrl, int direction)
          * waiting forever for a result that cannot describe a sector.
          */
         fdctrl_stop_transfer(fdctrl, FD_SR0_ABNTERM, FD_SR1_ND, 0x00);
+        return;
+    }
+    if (fdctrl->pc98) {
+        /*
+         * PC-98 BIOS software commonly polls RQM in a bounded 16-bit loop.
+         * The generic 20 ms rotational-delay timer can outlive that loop,
+         * making a perfectly ready disk look not-ready after an otherwise
+         * successful data transfer.  Complete READ ID synchronously for the
+         * PC-98 interface, as the historical emulators do.
+         */
+        fdctrl_result_timer(fdctrl);
         return;
     }
     timer_mod(fdctrl->result_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
@@ -2747,7 +2764,6 @@ enum {                          /* status word (read at 0x94/0xcc) */
 enum {                          /* control word (written at 0x94/0xcc) */
     FDCTL_MOTOR     = 0x08,
     FDCTL_DMA_EN    = 0x10,
-    FDCTL_INT_EN    = 0x20,
     FDCTL_FORCE_RDY = 0x40,
     FDCTL_NRESET    = 0x80,
 };
@@ -2774,6 +2790,7 @@ struct Pc98FdcState {
     PortioList portio_list;
 
     uint8_t force_ready;
+    uint8_t ctrl_reg;
     uint8_t mode_reg;
     uint8_t mode144_reg;
     qemu_irq irq11; /* 1MB I/F */
@@ -2799,6 +2816,16 @@ static uint32_t pc98_fdc_read_port(void *opaque, uint32_t reg)
     case 0x94:
     case 0xcc:
         value = FDSTAT_TYPE0 | FDSTAT_INT0;
+        /*
+         * Port 0x94 reports that the 1 MB interface is DMA capable.  This
+         * is a hardware capability bit, not a reflection of FDCTL_DMA_EN.
+         * PC-98 software uses it to choose between DMA and polled PIO, and
+         * only enables DMA in the control register after observing it.
+         * The 640 KB interface at 0xcc does not advertise this capability.
+         */
+        if (reg == 0x94) {
+            value |= FDSTAT_DMA;
+        }
         if (isa->force_ready) {
             value |= FDSTAT_READY;
         } else {
@@ -2855,7 +2882,9 @@ static void pc98_fdc_write_port(void *opaque, uint32_t reg, uint32_t value)
             fdctrl->dor |= FD_DOR_nRESET;
         }
         isa->force_ready = ((value & FDCTL_FORCE_RDY) != 0);
+        isa->ctrl_reg = value;
         fdctrl->pc98_force_ready = isa->force_ready;
+        fdctrl->pc98_dma_enabled = (value & FDCTL_DMA_EN) != 0;
         if (isa->mode_reg & FDMODE_EMTON) {
             if (value & FDCTL_MOTOR) {
                 fdctrl->dor |= (FD_DOR_MOTEN0 | FD_DOR_MOTEN1);
@@ -2912,8 +2941,10 @@ static void pc98_fdc_setup_interface(Pc98FdcState *isa)
     isa->mode_reg = FDMODE_FDD_EXC | FDMODE_PORT_EXC;
     isa->mode144_reg = 0;
     isa->force_ready = 0;
+    isa->ctrl_reg = 0;
     fdctrl->pc98 = 1;
     fdctrl->pc98_force_ready = 0;
+    fdctrl->pc98_dma_enabled = 0;
     fdctrl->irq = isa->irq11;
     fdctrl->dma_chann = 2;
     fdctrl->dor |= FD_DOR_DMAEN;
@@ -2986,8 +3017,13 @@ static int pc98_fdc_post_load(void *opaque, int version_id)
     Pc98FdcState *isa = opaque;
     FDCtrl *fdctrl = &isa->state;
 
+    if (version_id < 4) {
+        /* Older snapshots always used the DMA path on PC-98. */
+        isa->ctrl_reg = FDCTL_DMA_EN;
+    }
     fdctrl->pc98 = 1;
     fdctrl->pc98_force_ready = isa->force_ready;
+    fdctrl->pc98_dma_enabled = (isa->ctrl_reg & FDCTL_DMA_EN) != 0;
     if (isa->mode_reg & FDMODE_PORT_EXC) {
         fdctrl->irq = isa->irq11;
         fdctrl->dma_chann = 2;
@@ -2995,13 +3031,12 @@ static int pc98_fdc_post_load(void *opaque, int version_id)
         fdctrl->irq = isa->irq10;
         fdctrl->dma_chann = 3;
     }
-
     return 0;
 }
 
 static const VMStateDescription vmstate_pc98_fdc_dev = {
     .name = "pc98-fdc",
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 2,
     .post_load = pc98_fdc_post_load,
     .fields = (const VMStateField[]) {
@@ -3009,6 +3044,7 @@ static const VMStateDescription vmstate_pc98_fdc_dev = {
         VMSTATE_UINT8_V(force_ready, Pc98FdcState, 3),
         VMSTATE_UINT8_V(mode_reg, Pc98FdcState, 3),
         VMSTATE_UINT8_V(mode144_reg, Pc98FdcState, 3),
+        VMSTATE_UINT8_V(ctrl_reg, Pc98FdcState, 4),
         VMSTATE_END_OF_LIST()
     }
 };
