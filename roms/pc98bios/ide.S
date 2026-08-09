@@ -492,6 +492,11 @@ int1b_sense:
 	movb	%cs:ROM_WORK_HEADS(%bx), %ah
 	movb	%cs:ROM_WORK_SECTORS(%bx), %al
 	movw	%ax, 6(%bp)
+	cmpb	$4,%ah
+	jne	2f
+	movb	$0x03, %ah
+	jmp	int1b_finish
+2:
 	movb	$0x0f, %ah
 	jmp	int1b_finish
 
@@ -778,7 +783,48 @@ ata_identify_geometry:
 	jne	7f		//2TB越えは2TBに変更
 	cmpl	$0x880000,%eax	//8*17*65536
 	ja	7f		//4351MiB越えはnative値でそのまま
-
+	pushl	%eax
+	cmpl	$81872,%eax	//約40MiBより大きなものにはH=8をあてがう
+	ja	8f
+	popl	%eax
+9:
+	movw	$IDE_DATA, %dx
+	inw	%dx, %ax
+	movw	$IDE_STATUS,%dx
+	inb	%dx, %al
+	testb	$0x8,%al
+	jnz	9b
+	mov	$IDE_DRVHEAD,%dx
+	inb	%dx,%al
+	and	$0x10,%al
+	or	$3,%al		//H=4
+	outb	%al,%dx
+	mov	$IDE_SECCNT,%dx
+	mov	$0x11,%al
+	outb	%al,%dx
+	movw	$IDE_COMMAND, %dx
+	movb	$ATA_SPECIFY, %al
+	outb	%al, %dx
+	popl	%edx
+	popl	%ecx
+	popl	%ebx
+	popl	%eax
+	movw	$4,%si
+5:
+	movw	$IDE_COMMAND, %dx
+	movb	$ATA_IDENTIFY, %al
+	outb	%al, %dx
+	call	ata_wait_drq
+	jc	5b
+	movw	$IDE_DATA, %dx
+	movw	$7, %cx		/* words 0 through 6 */
+3:
+	inw	%dx, %ax
+	loop	3b
+	movw	$17,%cx
+	mov	$0x266,%bx	//C=614固定 20MiB値
+	jmp	6f
+	
 8:
 	movw	$IDE_DATA, %dx
 	inw	%dx, %ax
@@ -786,8 +832,6 @@ ata_identify_geometry:
 	inb	%dx, %al
 	testb	$0x8,%al
 	jnz	8b
-
-	movl	%eax,%ecx
 	mov	$IDE_DRVHEAD,%dx
 	inb	%dx,%al
 	and	$0x10,%al
@@ -799,11 +843,10 @@ ata_identify_geometry:
 	movw	$IDE_COMMAND, %dx
 	movb	$ATA_SPECIFY, %al
 	outb	%al, %dx
-	movl	$0x88,%eax
-	xchg	%eax,%ecx
+	movl	$0x88,%ecx
 	xorl	%edx,%edx
+	popl	%eax
 	divl	%ecx
-
 	movw	%ax,%si
 	popl	%edx
 	popl	%ecx
@@ -813,11 +856,9 @@ ata_identify_geometry:
 	inc	%bx
 	dec	%bx
 	jnc	8f
-	dec	%bx
+	decw	%bx
 8:
-	movw	$17,%cx
 	movw	$8,%si
-
 5:
 	movw	$IDE_COMMAND, %dx
 	movb	$ATA_IDENTIFY, %al
@@ -830,6 +871,7 @@ ata_identify_geometry:
 3:
 	inw	%dx, %ax
 	loop	3b
+	movw	$17,%cx
 	jmp	6f
 
 7:
@@ -1313,6 +1355,7 @@ ata_wait_drq:
 	ret
 
 ata_failed:
+jmp ata_failed
 	movb	$0x40, %ah		/* equipment/not-ready class error */
 	stc
 	ret
