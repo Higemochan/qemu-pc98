@@ -43,6 +43,10 @@ config SERIAL_PCI_MULTI
     depends on PCI
     select SERIAL
 
+config PC98_SERIAL
+    bool
+    depends on ISA_BUS
+
 config VIRTIO_SERIAL
     bool
     default y
