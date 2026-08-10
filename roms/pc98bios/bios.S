@@ -298,8 +298,19 @@ cold_start:
 	 */
 	call	post_memory_message
 	call	post_diagnostics_message
-	movw	$10, %cx		/* 100-ms power-on tone */
-	movw	$880, %dx
+	/* two-tone power-on "pi-po" chime, interrupt-timed: 2000 Hz then 1000 Hz */
+	movw	$7, %cx			/* pi: ~70 ms */
+	movw	$2000, %dx
+	movb	$0x06, %ah
+	int	$0x1c
+	pushw	%ds			/* wait out pi via its own interrupt-timed counter */
+	xorw	%ax, %ax
+	movw	%ax, %ds
+1:	cmpw	$0, BEEP_COUNT
+	jnz	1b
+	popw	%ds
+	movw	$1000, %dx		/* po */
+	movw	$8, %cx			/* po: ~80 ms */
 	movb	$0x06, %ah
 	int	$0x1c
 	pushw	%cs

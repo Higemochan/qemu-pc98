@@ -216,7 +216,6 @@ cold_start:
 	call	disp_init
 	call	pal_init
 	call	pit_init
-	call	beep_pipo
 	call	pci_init
 	call	ide_probe_latch
 	call	memsw_init
@@ -718,65 +717,6 @@ pit_init:
 	ret
 
 #include "pit.inc"
-
-/*
- * Power-on "pi-po" chime.
- *
- * Two square-wave tones on PIT channel 1, gated to the speaker through the
- * active-low system-PPI port-C bit 3 at port 0x37 -- the same path
- * int1c_beep drives.  1229 and 2458 are the channel-1 divisors the stock
- * PIT table already cycles through (~2000 Hz then ~1000 Hz); the NEC
- * firmware sounds them after the memory test.  The dwell is a WAIT_IO burn
- * loop, whose length is set by ear.
- */
-	.equ	BEEP_TONE_COUNT, 520000
-	.equ	BEEP_GAP_COUNT,  160000
-
-beep_pipo:
-	pushw	%ax
-	pushw	%bx
-	pushw	%cx
-	movw	$0x04cd, %bx		/* 1229 -> ~2000 Hz (pi) */
-	call	beep_tone
-	call	beep_gap
-	movw	$0x099a, %bx		/* 2458 -> ~1000 Hz (po) */
-	call	beep_tone
-	movb	$0x07, %al		/* port-C bit 3 high: speaker off */
-	outb	%al, $0x37
-	popw	%cx
-	popw	%bx
-	popw	%ax
-	ret
-
-/* Sound the tone whose PIT ch1 divisor is in BX, then fall silent. */
-beep_tone:
-	movb	$0x76, %al		/* ch1, LSB/MSB, mode 3 (square) */
-	outb	%al, $0x77
-	movb	%bl, %al
-	outb	%al, $0x73
-	movb	%bh, %al
-	outb	%al, $0x73
-	movb	$0x06, %al		/* port-C bit 3 low: speaker on */
-	outb	%al, $0x37
-	movl	$BEEP_TONE_COUNT, %ecx
-1:
-	outb	%al, $WAIT_IO
-	decl	%ecx
-	jnz	1b
-	movb	$0x07, %al		/* speaker off */
-	outb	%al, $0x37
-	ret
-
-/* Silent gap between the two tones. */
-beep_gap:
-	movb	$0x07, %al
-	outb	%al, $0x37
-	movl	$BEEP_GAP_COUNT, %ecx
-1:
-	outb	%al, $WAIT_IO
-	decl	%ecx
-	jnz	1b
-	ret
 
 /*
  * Publish the IDE probe bitmap.
