@@ -114,6 +114,26 @@ static void pic_update_irq(PICCommonState *s)
     }
 }
 
+/* See i8259.h. */
+bool pc98_pic_reap_master_irq(int irq)
+{
+    PICCommonState *s = isa_pic;
+    int mask = 1 << irq;
+    bool had;
+
+    if (!s) {
+        return false;
+    }
+    had = (s->irr | s->isr) & mask;
+    if (had) {
+        s->irr &= ~mask;
+        s->last_irr &= ~mask;
+        s->isr &= ~mask;
+        pic_update_irq(s);
+    }
+    return had;
+}
+
 /* set irq level. If an edge is detected, then the IRR is set to 1 */
 static void pic_set_irq(void *opaque, int irq, int level)
 {

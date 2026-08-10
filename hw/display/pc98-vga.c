@@ -37,6 +37,7 @@
 #include "hw/core/loader.h"
 #include "hw/display/pc98-vga.h"
 #include "hw/i386/pc98.h"
+#include "hw/intc/i8259.h"
 #include "system/ioport.h"
 #include "system/memory.h"
 #include "system/reset.h"
@@ -237,6 +238,7 @@ struct VGAState {
     uint32_t cgwindow_addr_high;
 
     QEMUTimer *vsync_timer;
+    QEMUTimer *disp_timer;
     qemu_irq irq;
     int64_t vsync_clock;
 };
@@ -2652,6 +2654,22 @@ enum {
 
 /* vsync */
 
+/*
+ * A short time after each vsync -- once the vertical-retrace window has
+ * passed -- reap the vsync interrupt (master IR2) if it is still in-service
+ * or pending.  A real vsync handler finishes within the retrace window; one
+ * that is still outstanding here was abandoned by a game that armed the
+ * interrupt but never EOI'd it.  Left alone it would stay in-service and, by
+ * 8259 priority, block every lower-priority interrupt -- notably the OPNA FM
+ * timer that drives music.  Reaping it frees the rest of the frame; a handler
+ * that already EOI'd sees a no-op.  The PC-98 machine wires vsync to IR2.
+ */
+static void disp_timer_handler(void *opaque)
+{
+    (void)opaque;
+    pc98_pic_reap_master_irq(2);
+}
+
 static void vsync_timer_handler(void *opaque)
 {
     VGAState *s = opaque;
@@ -2669,8 +2687,9 @@ static void vsync_timer_handler(void *opaque)
         s->crtv = 0;
     }
 
-    /* set next timer */
+    /* end-of-retrace reap, then next frame */
     s->vsync_clock = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    timer_mod(s->disp_timer, s->vsync_clock + GDC_VSTICKS);
     timer_mod(s->vsync_timer, s->vsync_clock + GDC_VTICKS);
 }
 
@@ -4903,6 +4922,7 @@ static const VMStateDescription vmstate_pc98_vga = {
         VMSTATE_UINT8(font_line, VGAState),
         VMSTATE_UINT8(blink, VGAState),
         VMSTATE_TIMER_PTR(vsync_timer, VGAState),
+        VMSTATE_TIMER_PTR(disp_timer, VGAState),
         VMSTATE_INT64(vsync_clock, VGAState),
         VMSTATE_END_OF_LIST()
     }
@@ -5107,6 +5127,8 @@ Pc98VgaState *pc98_vga_init(MemoryRegion *system_io, qemu_irq irq,
 
     s->vsync_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                   vsync_timer_handler, s);
+    s->disp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                 disp_timer_handler, s);
 
     pc98_vga_reset(s);
     qemu_register_reset(pc98_vga_reset, s);
