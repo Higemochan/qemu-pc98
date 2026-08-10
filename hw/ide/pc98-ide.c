@@ -282,6 +282,11 @@ static uint32_t pc98_ide_cmd_read(void *opaque, uint32_t addr)
         }
         bus->unit = unit ^ 1;
     }
+    if (reg == 7 && bus->ifs[bus->unit].blk) {
+        /* The PC-98 BIOS polls status without yielding long enough for a
+         * file-backed request to complete on the main AioContext. */
+        blk_drain(bus->ifs[bus->unit].blk);
+    }
     ret = ide_ioport_read(bus, reg);
     if (reg == 7) {
         ret = pc98_ide_fixup_status(bus, ret);
