@@ -100,6 +100,7 @@ struct Pc98MachineState {
     Pc98VgaState *vga;
     Pc98IdeState *ide;
     uint8_t shutdown_index;
+    char *pcspk_audiodev;
 
     PortioList portio_list;
 };
@@ -383,6 +384,10 @@ static void pc98_devices_init(Pc98MachineState *pms)
         qdev_prop_set_uint8(DEVICE(speaker), "pit-channel", 1);
         object_property_set_link(OBJECT(speaker), "pit", OBJECT(pitdev),
                                  &error_fatal);
+        if (pms->pcspk_audiodev && pms->pcspk_audiodev[0]) {
+            qdev_prop_set_string(DEVICE(speaker), "audiodev",
+                                 pms->pcspk_audiodev);
+        }
         isa_realize_and_unref(speaker, isa_bus, &error_fatal);
         qdev_connect_gpio_out_named(
             DEVICE(sysdev), "speaker", 0,
@@ -533,6 +538,20 @@ static bool pc98_get_kernel_irqchip_default(const MachineState *ms)
     return false;
 }
 
+static char *pc98_get_pcspk_audiodev(Object *obj, Error **errp)
+{
+    Pc98MachineState *pms = PC98_MACHINE(obj);
+    return g_strdup(pms->pcspk_audiodev);
+}
+
+static void pc98_set_pcspk_audiodev(Object *obj, const char *value,
+                                    Error **errp)
+{
+    Pc98MachineState *pms = PC98_MACHINE(obj);
+    g_free(pms->pcspk_audiodev);
+    pms->pcspk_audiodev = g_strdup(value);
+}
+
 static void pc98_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -557,6 +576,11 @@ static void pc98_class_init(ObjectClass *oc, const void *data)
     pmc->has_coregraph = false;
     pmc->pegc_post_compat = false;
 
+    object_class_property_add_str(oc, "pcspk-audiodev",
+                                  pc98_get_pcspk_audiodev,
+                                  pc98_set_pcspk_audiodev);
+    object_class_property_set_description(oc, "pcspk-audiodev",
+        "audiodev id for the PC-98 beep speaker (PIT channel 1)");
 }
 
 /*
