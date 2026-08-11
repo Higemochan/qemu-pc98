@@ -784,7 +784,8 @@ ata_identify_geometry:
 	cmpl	$0x880000,%eax	//8*17*65536
 	ja	7f		//4351MiB越えはnative値でそのまま
 	pushl	%eax
-	cmpl	$81872,%eax	//約40MiBより大きなものにはH=8をあてがう
+//	cmpl	$81872,%eax	//約40MiBより大きなものにはH=8をあてがう
+	cmpl	$41752,%eax	// Awe テスト用 コミットしないこと: 614*4*17: 約20MiBより大きければH=8 (V13で動作のため)
 	ja	8f
 	popl	%eax
 9:
