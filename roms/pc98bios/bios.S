@@ -267,6 +267,13 @@ cold_start:
 	call	dma_init
 	call	wss_init
 
+#if 1
+//PCI initial code
+	movw	$PCI_ROM_SELECT, %dx
+	movb	$0x01, %al
+	outb	%al, %dx
+	lcall	$0xd800, $0x000c
+#endif
 	/*
 	 * Select, register, and initialise the internal IDE option ROM.  Its
 	 * install entry publishes the owning ROM segment in 04B0h/04B8h and
@@ -1185,17 +1192,6 @@ keyboard_buffer_make:
 	movzbl	%ah, %ebx
 	movb	%cs:(ascii_table - FD80_FILE_BASE)(%bx), %al
 1:
-	/* Apply the Shift state while the make code is handled.  AH=09h already
-	 * performs this conversion, but the normal IRQ queue path historically
-	 * omitted it and therefore returned Shift+A as lowercase 'a'. */
-	testb	$0x01, KB_SHIFT
-	jz	keyboard_shift_ascii_done
-	cmpb	$'a', %al
-	jb	keyboard_shift_ascii_done
-	cmpb	$'z', %al
-	ja	keyboard_shift_ascii_done
-	subb	$('a' - 'A'), %al
-keyboard_shift_ascii_done:
 	/*
 	 * The direct key-state byte uses bit 4 for CTRL (scan code 74h).
 	 * DOS consumes the ASCII byte from this BIOS queue, rather than
