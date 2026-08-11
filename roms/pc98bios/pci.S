@@ -1,6 +1,7 @@
 /*
  * Minimal PC-9821 BIOS / PCI option ROM, bank 0
 *  Copyright (C) 2026 Awe Morris
+*  Copyright (C) 2026 drachen6jp
  *
  * The main BIOS maps this bank into the D8000 option window and enters +1Bh
  * for INT 1Ah functions AH=B1h/B4h.  The handler below implements the
@@ -91,6 +92,7 @@ pci_post_config:
 	pushl	%eax
 	pushl	%ebx
 	pushl	%edx
+
 	/* 00:08.0, Intel 82371SB UHCI: I/O 6000h, bus master, IRQ 14. */
 	movw	$PCI_ADDR, %dx
 	movl	$0x80004000, %eax
@@ -191,82 +193,15 @@ findbridge:
 	cmpw	$1, %si
 	jne	2f
 	movw	$0xc0c0, %ax		//bridge 1 IO=C000-CFFF
-	outw	%ax, %dx
-	popl	%eax
-	pushl	%eax
-	movw	$PCI_ADDR, %dx
-	movb	$0x18, %al
-	outl	%eax, %dx
-	movw	$PCI_DATA, %dx
-	movl	$0x010100, %eax	//busnumber = 1
-	outl	%eax, %dx
-	pop	%eax
-	push	%eax
-	movw	$PCI_ADDR, %dx
-	popl	%eax
-	pushl	%eax
-	movb	$0x4, %al
-	outl	%eax, %dx
-	movw	$PCI_DATA, %dx
-	movb	$0x7, %al		//Enable IO MEM BM
-	outb	%al, %dx
-	pop	%eax
-	push	%eax
-	movw	$PCI_ADDR, %dx
-	movb	$0x20, %al
-	outl	%eax, %dx
-	movw	$PCI_DATA, %dx
-	movl	$0x80008000, %eax	//Memory 80000000h-800fffff
-	outl	%eax, %dx
-	pop	%eax
-	push	%eax
-	movw	$PCI_ADDR, %dx
-	movb	$0x24, %al
-	outl	%eax, %dx
-	movw	$PCI_DATA, %dx
-	movl	$0x80018001, %eax	//PrefetchMemory 80000000h-800fffff
-	outl	%eax, %dx
 	jmp	4f
 2:
 	cmpw	$2, %si
 	jne	3f
 	movw	$0x7070, %ax		//bridge 2 IO=7000-7FFF
-	outw	%ax, %dx
-	popl	%eax
-	pushl	%eax
-	movw	$PCI_ADDR, %dx
-	movb	$0x18, %al
-	outl	%eax, %dx
-	movw	$PCI_DATA, %dx
-	movl	$0x020200, %eax	//busnumber = 2
-	outl	%eax, %dx
-	pop	%eax
-	push	%eax
-	movw	$PCI_ADDR, %dx
-	movb	$0x4, %al
-	outl	%eax, %dx
-	movw	$PCI_DATA, %dx
-	movb	$0x7, %al		//Enable IO MEM BM
-	outb	%al, %dx
-	pop	%eax
-	push	%eax
-	movw	$PCI_ADDR, %dx
-	movb	$0x20, %al
-	outl	%eax, %dx
-	movw	$PCI_DATA, %dx
-	movl	$0x80108010, %eax	//Memory 80100000h-801fffff
-	outl	%eax, %dx
-	pop	%eax
-	push	%eax
-	movw	$PCI_ADDR, %dx
-	movb	$0x24, %al
-	outl	%eax, %dx
-	movw	$PCI_DATA, %dx
-	movl	$0x80118011, %eax	//PrefetchMemory 80000000h-800fffff
-	outl	%eax, %dx
 	jmp	4f
 3:
 	movw	$0x6060, %ax		//bridge 3 IO=6000-6FFF
+4:
 	outw	%ax, %dx
 	popl	%eax
 	pushl	%eax
@@ -274,7 +209,18 @@ findbridge:
 	movb	$0x18, %al
 	outl	%eax, %dx
 	movw	$PCI_DATA, %dx
+	cmpw	$1, %si
+	jne	2f
+	movl	$0x010100, %eax	//busnumber = 1
+	jmp	4f
+2:
+	cmpw	$2, %si
+	jne	3f
+	movl	$0x020200, %eax	//busnumber = 2
+	jmp	4f
+3:
 	movl	$0x030300, %eax	//busnumber = 3
+4:
 	outl	%eax, %dx
 	pop	%eax
 	push	%eax
@@ -292,7 +238,18 @@ findbridge:
 	movb	$0x20, %al
 	outl	%eax, %dx
 	movw	$PCI_DATA, %dx
+	cmpw	$1, %si
+	jne	2f
+	movl	$0x80008000, %eax	//Memory 80000000h-800fffff
+	jmp	4f
+2:
+	cmpw	$2, %si
+	jne	3f
+	movl	$0x80108010, %eax	//Memory 80100000h-801fffff
+	jmp	4f
+3:
 	movl	$0x80208020, %eax	//Memory 80200000h-802fffff
+4:
 	outl	%eax, %dx
 	pop	%eax
 	push	%eax
@@ -300,9 +257,19 @@ findbridge:
 	movb	$0x24, %al
 	outl	%eax, %dx
 	movw	$PCI_DATA, %dx
-	movl	$0x80218021, %eax	//PrefetchMemory 80000000h-800fffff
-	outl	%eax, %dx
+	cmpw	$1, %si
+	jne	2f
+	movl	$0x80018001, %eax	//PrefetchMemory 80000000h-800fffff
+	jmp	4f
+2:
+	cmpw	$2, %si
+	jne	3f
+	movl	$0x80118011, %eax	//PrefetchMemory 80100000h-801fffff
+	jmp	4f
+3:
+	movl	$0x80218021, %eax	//PrefetchMemory 80200000h-802fffff
 4:
+	outl	%eax, %dx
 	pop	%eax
 	shrw	$3, %ax
 	incb	%ah
@@ -405,15 +372,32 @@ findcard:
 	call	9f
 	ret
 8:
+	movl	$0xffffffff, %eax
+	outl	%eax, %dx
+	inl	%dx, %eax
+	cmpl	$0, %eax
+	je	6f
+	andl	$0xfffffff0, %eax
+	movl	%eax, %ecx
+	not	%ecx
+	inc	%ecx
+	addl	%ecx, %edi
 	movl	%edi, %eax
 	outl	%eax, %dx
-	addl	$0x10000, %edi
+	addl	%ecx, %edi
+6:
 	ret
 9:
+	movl	$0xffff, %eax
+	outl	%eax, %dx
+	inl	%dx, %eax
+	movl	$0x10001, %ecx
+	subl	%eax,%ecx
+	addw	%cx, %si
 	xorl	%eax, %eax
 	movw	%si, %ax
 	outl	%eax, %dx
-	addw	$0x20, %si
+	addw	%cx, %si
 	ret
 
 	/* Published signature retained at the same bank offset as the Xa7 ROM. */

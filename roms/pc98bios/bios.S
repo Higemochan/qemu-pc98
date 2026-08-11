@@ -1,6 +1,7 @@
 /*
  * Minimal PC-9821 BIOS / Main BIOS banks.
  * Copyright (C) 2026 Awe Morris
+ * Copyright (C) 2026 drachen6jp
  *
  * The combined image occupies banks 5-7 (E8000h-FFFFFh).  The ITF enters
  * FD80:0002 after paging bank 7 into the top window.  This first stage
