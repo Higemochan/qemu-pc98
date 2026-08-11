@@ -309,7 +309,7 @@ cold_start:
 1:	cmpw	$0, BEEP_COUNT
 	jnz	1b
 	popw	%ds
-	movw	$3000, %dx		/* po: RISES to 3000 Hz (real Ap3/C9W chime) */
+	movw	$1000, %dx		/* po: falls to 1000 Hz (real chime, autocorrelation) */
 	movw	$10, %cx		/* ~100 ms */
 	movb	$0x06, %ah
 	int	$0x1c
