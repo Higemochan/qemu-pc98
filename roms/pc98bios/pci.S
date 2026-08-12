@@ -1,6 +1,7 @@
 /*
  * Minimal PC-9821 BIOS / PCI option ROM, bank 0
 *  Copyright (C) 2026 Awe Morris
+*  Copyright (C) 2026 drachen6jp
  *
  * The main BIOS maps this bank into the D8000 option window and enters +1Bh
  * for INT 1Ah functions AH=B1h/B4h.  The handler below implements the
@@ -41,8 +42,12 @@ _start:
 	/* +09 is reserved in the stock PCI bank. */
 	.byte	0x00, 0x00, 0x00
 
-	/* +0C .. +18 */
-	.rept	5
+//+0Ch
+	.byte	0xe9
+	.word	initial_pci - . - 2
+
+	/* +0E .. +18 */
+	.rept	4
 	lret
 	nop
 	nop
@@ -149,6 +154,251 @@ pci_post_config:
 	popl	%ebx
 	popl	%eax
 	lret
+
+initial_pci:
+	pushl	%eax
+	pushl	%ebx
+	pushl	%edx
+	pushl	%ecx
+	pushl	%esi
+	pushl	%edi
+	movl	$0x80000000,%eax
+	xorl	%esi,%esi
+	movb	$0x1,%ah
+1:
+	shlw	$3, %ax
+	movb	$0xe, %al
+	movw	$PCI_ADDR, %dx
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	inb	%dx, %al
+	cmpb	$1, %al	//PCI- to PCI Bridge
+	je	findbridge
+2:
+	shrw	$3, %ax
+	incb	%ah
+	cmpb	$31, %ah
+	ja	hostend
+	jmp	1b
+
+findbridge:
+	incl	%esi
+	cmpw	$3, %si		//1段目のブリッジは3つ分くらいしかIOがない かも
+	ja	2b
+	movb	$0x1c,%al
+	movw	$PCI_ADDR, %dx
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	push	%eax
+	cmpw	$1, %si
+	jne	2f
+	movw	$0xc0c0, %ax		//bridge 1 IO=C000-CFFF
+	jmp	4f
+2:
+	cmpw	$2, %si
+	jne	3f
+	movw	$0x7070, %ax		//bridge 2 IO=7000-7FFF
+	jmp	4f
+3:
+	movw	$0x6060, %ax		//bridge 3 IO=6000-6FFF
+4:
+	outw	%ax, %dx
+	popl	%eax
+	pushl	%eax
+	movw	$PCI_ADDR, %dx
+	movb	$0x18, %al
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	cmpw	$1, %si
+	jne	2f
+	movl	$0x010100, %eax	//busnumber = 1
+	jmp	4f
+2:
+	cmpw	$2, %si
+	jne	3f
+	movl	$0x020200, %eax	//busnumber = 2
+	jmp	4f
+3:
+	movl	$0x030300, %eax	//busnumber = 3
+4:
+	outl	%eax, %dx
+	pop	%eax
+	push	%eax
+	movw	$PCI_ADDR, %dx
+	popl	%eax
+	pushl	%eax
+	movb	$0x4, %al
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	movb	$0x7, %al		//Enable IO MEM BM
+	outb	%al, %dx
+	pop	%eax
+	push	%eax
+	movw	$PCI_ADDR, %dx
+	movb	$0x20, %al
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	cmpw	$1, %si
+	jne	2f
+	movl	$0x80008000, %eax	//Memory 80000000h-800fffff
+	jmp	4f
+2:
+	cmpw	$2, %si
+	jne	3f
+	movl	$0x80108010, %eax	//Memory 80100000h-801fffff
+	jmp	4f
+3:
+	movl	$0x80208020, %eax	//Memory 80200000h-802fffff
+4:
+	outl	%eax, %dx
+	pop	%eax
+	push	%eax
+	movw	$PCI_ADDR, %dx
+	movb	$0x24, %al
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	cmpw	$1, %si
+	jne	2f
+	movl	$0x80018001, %eax	//PrefetchMemory 80000000h-800fffff
+	jmp	4f
+2:
+	cmpw	$2, %si
+	jne	3f
+	movl	$0x80118011, %eax	//PrefetchMemory 80100000h-801fffff
+	jmp	4f
+3:
+	movl	$0x80218021, %eax	//PrefetchMemory 80200000h-802fffff
+4:
+	outl	%eax, %dx
+	pop	%eax
+	shrw	$3, %ax
+	incb	%ah
+	jmp	1b
+
+hostend:
+	shll	$16,%esi
+	movw	$0xe001, %si
+	movl	$0xe0000000, %edi
+	movl	$0x80000000, %eax
+	movb	$0x1,%ah
+	pushl	%eax
+1:
+	shlw	$3, %ax
+	movb	$0, %al
+	movw	$PCI_ADDR, %dx
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	inw	%dx, %ax
+	cmpw	$0xffff, %ax
+	jne	findcard
+2:
+	popl	%eax
+	incb	%ah
+	pushl	%eax
+	cmpb	$32, %ah
+	jb	1b	
+	popl	%eax
+	jmp	1f
+	
+1:
+	popl	%edi
+	popl	%esi
+	popl	%ecx
+	popl	%edx
+	popl	%ebx
+	popl	%eax
+	lret
+
+findcard:
+	popl	%eax
+	pushl	%eax
+	cmpb	$6, %ah	//CbusBridge
+	je	2b
+	cmpb	$7, %ah	//98CoreGRPH
+	je	2b
+	shlw	$3, %ax
+	movb	$0xe, %al
+	movw	$PCI_ADDR, %dx
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	inb	%dx, %al
+	cmpb	$0, %al
+	jne	2b
+	popl	%eax
+	pushl	%eax
+	shlw	$3, %ax
+	movb	$0x4, %al
+	movw	$PCI_ADDR, %dx
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	movb	$0x7, %al		//Enable IO MEM BM
+	outb	%al, %dx
+	popl	%eax
+	pushl	%eax
+	shlw	$3, %ax
+	movb	$0x3c, %al
+	movw	$PCI_ADDR, %dx
+	outl	%eax, %dx	
+	movw	$PCI_DATA, %dx
+	inw	%dx, %ax
+	cmpb	$0,%ah
+	je	1f
+	movb	$PCI_IRQ, %al		//IRQ 14
+	outb	%al, %dx
+1:
+	popl	%eax
+	pushl	%eax
+	shlw	$3, %ax
+	movb	$0xc, %al
+6:
+	addb	$0x4, %al
+	pushl	%eax
+	call	7f
+	popl	%eax
+	cmpb	$0x24, %al
+	jb	6b
+	jmp	2b
+
+7:
+	movw	$PCI_ADDR, %dx
+	outl	%eax, %dx
+	movw	$PCI_DATA, %dx
+	inb	%dx, %al
+	test	$1,%al
+	jne	3f
+	call	8f
+	ret
+3:
+	call	9f
+	ret
+8:
+	movl	$0xffffffff, %eax
+	outl	%eax, %dx
+	inl	%dx, %eax
+	cmpl	$0, %eax
+	je	6f
+	andl	$0xfffffff0, %eax
+	movl	%eax, %ecx
+	not	%ecx
+	inc	%ecx
+	addl	%ecx, %edi
+	movl	%edi, %eax
+	outl	%eax, %dx
+	addl	%ecx, %edi
+6:
+	ret
+9:
+	movl	$0xffff, %eax
+	outl	%eax, %dx
+	inl	%dx, %eax
+	movl	$0x10001, %ecx
+	subl	%eax,%ecx
+	addw	%cx, %si
+	xorl	%eax, %eax
+	movw	%si, %ax
+	outl	%eax, %dx
+	addw	%cx, %si
+	ret
 
 	/* Published signature retained at the same bank offset as the Xa7 ROM. */
 	.org	0x1102

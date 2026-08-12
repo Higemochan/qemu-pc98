@@ -1,6 +1,7 @@
 /*
  * Minimal PC-9821 BIOS / Main BIOS banks.
  * Copyright (C) 2026 Awe Morris
+ * Copyright (C) 2026 drachen6jp
  *
  * The combined image occupies banks 5-7 (E8000h-FFFFFh).  The ITF enters
  * FD80:0002 after paging bank 7 into the top window.  This first stage
@@ -267,6 +268,13 @@ cold_start:
 	call	dma_init
 	call	wss_init
 
+#if 1
+//PCI initial code
+	movw	$PCI_ROM_SELECT, %dx
+	movb	$0x01, %al
+	outb	%al, %dx
+	lcall	$0xd800, $0x000c
+#endif
 	/*
 	 * Select, register, and initialise the internal IDE option ROM.  Its
 	 * install entry publishes the owning ROM segment in 04B0h/04B8h and
