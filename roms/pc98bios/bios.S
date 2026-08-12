@@ -268,7 +268,7 @@ cold_start:
 	call	dma_init
 	call	wss_init
 
-#if 0
+#if 1
 //PCI initial code
 	movw	$PCI_ROM_SELECT, %dx
 	movb	$0x01, %al
@@ -306,19 +306,8 @@ cold_start:
 	 */
 	call	post_memory_message
 	call	post_diagnostics_message
-	/* two-tone power-on "pi-po" chime, interrupt-timed: 2000 Hz then 1000 Hz */
-	movw	$10, %cx		/* pi: 2000 Hz, ~100 ms */
-	movw	$2000, %dx
-	movb	$0x06, %ah
-	int	$0x1c
-	pushw	%ds			/* wait out pi via its own interrupt-timed counter */
-	xorw	%ax, %ax
-	movw	%ax, %ds
-1:	cmpw	$0, BEEP_COUNT
-	jnz	1b
-	popw	%ds
-	movw	$1000, %dx		/* po: falls to 1000 Hz (real chime, autocorrelation) */
-	movw	$10, %cx		/* ~100 ms */
+	movw	$10, %cx		/* 100-ms power-on tone */
+	movw	$880, %dx
 	movb	$0x06, %ah
 	int	$0x1c
 	pushw	%cs
