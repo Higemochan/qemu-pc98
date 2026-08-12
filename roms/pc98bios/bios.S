@@ -268,7 +268,7 @@ cold_start:
 	call	dma_init
 	call	wss_init
 
-#if 1
+#if 0
 //PCI initial code
 	movw	$PCI_ROM_SELECT, %dx
 	movb	$0x01, %al
